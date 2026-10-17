@@ -78,23 +78,30 @@ Not audited; use small amounts only.
 ## 4. Agent server
 
 Two HTTP endpoints, keys only in server environment variables
-(`RESEARCH_AGENT_PRIVATE_KEY`, `SPECIALIST_ADDRESS`, `SPECIALIST_PRICE_USDC`,
-`ANTHROPIC_API_KEY`, `RPC_URL`, `VAULT_ADDRESS`).
+(`RESEARCH_AGENT_PRIVATE_KEY`, `SPECIALIST_ADDRESS`, `SPECIALIST_PRICE_STANDARD_USDC`,
+`SPECIALIST_PRICE_PRIORITY_USDC`, `ANTHROPIC_API_KEY`, `RPC_URL`, `VAULT_ADDRESS`).
+
+The specialist sells two tiers: standard ($0.05) and priority ($0.20). Claude
+chooses only the tier; the amount always comes from server config. With a $0.10
+per-tx cap, a priority request is blocked by the vault, which is the demo's
+rejection moment.
 
 `POST /api/task { task }` — research agent:
 
-1. Calls Claude (small, cheap model) with one tool: `hire_specialist(request, priceUsdc)`.
-2. When Claude calls the tool, the server builds `jobId = keccak256(task, nonce)`.
+1. Calls Claude (small, cheap model) with one tool: `hire_specialist(request, tier)`.
+2. When Claude calls the tool, the server builds `jobId = keccak256(request, nonce)`,
+   which binds the payment to that exact request.
 3. Simulates `vault.pay(...)` with viem. On revert, decodes the custom error and
    returns it as a rejection event (for example `ExceedsDailyCap`), with no transaction sent.
 4. Otherwise sends the transaction and waits for the receipt (sub-second finality).
-5. Calls the specialist with `{ txHash, jobId, request }` and returns the result,
-   tx hash, and explorer link.
+5. Calls the specialist with `{ txHash, nonce, request, tier }` and returns the
+   result, tx hash, and explorer link.
 
-`POST /api/specialist { txHash, jobId, request }` — specialist agent:
+`POST /api/specialist { txHash, nonce, request, tier }` — specialist agent:
 
 1. Reads the receipt and requires a `Paid` event from the vault with
-   `payee == SPECIALIST_ADDRESS`, matching `jobId`, and `amount >= price`.
+   `payee == SPECIALIST_ADDRESS`, `jobId == keccak256(request, nonce)`, and
+   `amount >=` the configured price for `tier`.
 2. Runs Claude to produce the summary and returns it.
 
 Activity (payments and rejections) is read from contract events for the dashboard;
@@ -121,7 +128,8 @@ Arc Studio deploys to testnet only, so:
 4. Point the app at the mainnet address; host publicly (Arc Studio preview if it
    is public and persistent, otherwise Vercel from the GitHub repo).
 5. Fund with small amounts: vault $5, per-tx cap $0.10, daily cap $0.50,
-   specialist price $0.05. Research agent wallet gets ~$0.50 for gas.
+   specialist standard $0.05 and priority $0.20. Research agent wallet gets
+   ~$0.50 for gas.
 
 First Arc Studio session doubles as a spike: confirm it can write and run the
 agent server endpoints. If not, the endpoints live in the same repo as Vercel
