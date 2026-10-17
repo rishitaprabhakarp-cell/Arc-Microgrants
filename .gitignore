@@ -3,7 +3,8 @@
 .env*
 !.env.example
 node_modules/
-app/out/
-app/cache/
+app/contracts/out/
+app/contracts/cache/
 app/dist/
+app/.arc-studio/
 .vercel/
