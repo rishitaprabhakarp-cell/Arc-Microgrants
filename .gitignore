@@ -1,0 +1,9 @@
+.arc-out/
+.superpowers/
+.env*
+!.env.example
+node_modules/
+app/out/
+app/cache/
+app/dist/
+.vercel/
