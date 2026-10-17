@@ -12,9 +12,11 @@
     "typecheck": "tsc --noEmit",
     "check": "bash scripts/check.sh",
     "contracts:build": "forge build",
-    "contracts:test": "forge test"
+    "contracts:test": "forge test",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
     "@circle-fin/adapter-viem-v2": "^1.18.0",
     "@circle-fin/app-kit": "^1.15.2",
     "@circle-fin/developer-controlled-wallets": "^10.8.0",
@@ -34,6 +36,7 @@
     "sonner": "^1.7.1",
     "tailwind-merge": "^2.6.0",
     "viem": "^2.56.3",
+    "vitest": "^5.0.5",
     "wagmi": "^2.19.5"
   },
   "overrides": {
