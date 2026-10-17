@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createPublicClient, createWalletClient, http, privateKeyToAccount } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { arc, arcTestnet } from "viem/chains";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomBytes } from "crypto";

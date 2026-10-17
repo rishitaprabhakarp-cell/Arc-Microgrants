@@ -1,4 +1,4 @@
-import { decodeErrorResult, formatUnits } from "viem";
+import { BaseError, ContractFunctionRevertedError, formatUnits } from "viem";
 import type {
   PublicClient,
   WalletClient,
@@ -126,8 +126,20 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
       account: agentAddress,
     });
   } catch (err: unknown) {
-    const reason = extractContractErrorName(err);
-    return { ok: false, kind: "rejected", reason, tier, amountUsdc };
+    // If this is a viem BaseError, walk the chain for a ContractFunctionRevertedError.
+    // That carries the decoded errorName from the contract's custom error.
+    if (err instanceof BaseError) {
+      const revertErr = err.walk(
+        (e) => e instanceof ContractFunctionRevertedError,
+      ) as ContractFunctionRevertedError | null;
+      const revertData = revertErr?.data as { errorName?: string } | undefined;
+      if (revertData?.errorName) {
+        return { ok: false, kind: "rejected", reason: revertData.errorName, tier, amountUsdc };
+      }
+    }
+    // Any other failure (RPC down, timeout, unknown) → error, not rejected
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, kind: "error", message: `Simulate failed: ${message}` };
   }
 
   // ── 7. Send the transaction ─────────────────────────────────────────────
@@ -140,19 +152,33 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
     account: walletClient.account!,
   });
 
-  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  // ── 8. Confirm the receipt — reverted tx must not reach the specialist ──
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  if (receipt.status !== "success") {
+    return { ok: false, kind: "error", message: `Payment transaction reverted: ${txHash}` };
+  }
 
-  // ── 8. Call the specialist API ──────────────────────────────────────────
+  // ── 9. Call the specialist API ──────────────────────────────────────────
   const specResp = await fetch(`${config.publicBaseUrl}/api/specialist`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ txHash, nonce, request, tier }),
   });
 
-  let result = "(no response)";
+  let result: string;
   if (specResp.ok) {
     const body = (await specResp.json()) as { result?: string };
     result = body.result ?? "(empty)";
+  } else {
+    // Payment happened; specialist declined — surface the reason but keep ok: true
+    let reason = `HTTP ${specResp.status}`;
+    try {
+      const errBody = (await specResp.json()) as { reason?: string; error?: string };
+      reason = errBody.reason ?? errBody.error ?? reason;
+    } catch {
+      // ignore — keep the HTTP status string
+    }
+    result = `Specialist did not deliver: ${reason}`;
   }
 
   const explorerUrl = `${getExplorerBase()}/tx/${txHash}`;
@@ -160,36 +186,4 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
   return { ok: true, tier, amountUsdc, txHash, explorerUrl, result };
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
-function extractContractErrorName(err: unknown): string {
-  if (err && typeof err === "object") {
-    // viem ContractFunctionRevertedError carries a .data with selector
-    const e = err as Record<string, unknown>;
-    if (typeof e["name"] === "string" && e["name"] !== "Error") {
-      // Try to find errorName from viem's decoded error
-      const cause = e["cause"] as Record<string, unknown> | undefined;
-      const errorName =
-        (e["shortMessage"] as string | undefined) ??
-        (cause?.["errorName"] as string | undefined) ??
-        (e["name"] as string);
-      // Strip viem wrapper: extract bare error name like "ExceedsPerTxCap"
-      const match = errorName.match(/(\w+)\(\)/);
-      if (match) return match[1];
-      // Try data field for raw selector decode
-      const data = (e["data"] as string | undefined) ?? (cause?.["data"] as string | undefined);
-      if (data) {
-        try {
-          const decoded = decodeErrorResult({ abi: AGENT_VAULT_ABI, data: data as Hex });
-          return decoded.errorName;
-        } catch {
-          // ignore
-        }
-      }
-      return errorName;
-    }
-    // viem wraps: ContractFunctionRevertedError → cause has errorName
-    if (cause && typeof cause["errorName"] === "string") return cause["errorName"] as string;
-  }
-  return "UnknownError";
-}

@@ -1,7 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseUnits, encodeErrorResult } from "viem";
+import {
+  parseUnits,
+  encodeErrorResult,
+  ContractFunctionRevertedError,
+  ContractFunctionExecutionError,
+  HttpRequestError,
+} from "viem";
 import type { Hex, Address } from "viem";
 import { runTask, type ResearchDeps, type Tier } from "./research.js";
+import { AGENT_VAULT_ABI } from "./abi.js";
 import type { Config } from "./config.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -72,7 +79,7 @@ function makeDeps(overrides: Partial<ResearchDeps> = {}): ResearchDeps {
   const publicClient = {
     getBalance: vi.fn().mockResolvedValue(balanceGood),
     simulateContract: vi.fn().mockResolvedValue({ result: undefined }),
-    waitForTransactionReceipt: vi.fn().mockResolvedValue({}),
+    waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "success" }),
   };
 
   const walletClient = {
@@ -114,7 +121,8 @@ describe("runTask (research agent)", () => {
     expect(result.explorerUrl).toContain(TX_HASH);
 
     // writeContract was called
-    expect((deps.walletClient as { writeContract: ReturnType<typeof vi.fn> }).writeContract).toHaveBeenCalledOnce();
+    const wc = deps.walletClient as unknown as { writeContract: ReturnType<typeof vi.fn> };
+    expect(wc.writeContract).toHaveBeenCalledOnce();
 
     // specialist POST was called with correct body
     const fetchMock = deps.fetch as ReturnType<typeof vi.fn>;
@@ -127,16 +135,16 @@ describe("runTask (research agent)", () => {
   });
 
   it("returns rejected with ExceedsPerTxCap when simulate reverts and sends no tx", async () => {
-    // Encode ExceedsPerTxCap custom error the same way viem does
-    const errData = encodeErrorResult({
-      abi: [{ type: "error", name: "ExceedsPerTxCap", inputs: [] }],
-      errorName: "ExceedsPerTxCap",
-      args: [],
+    // Build a real viem ContractFunctionExecutionError wrapping a ContractFunctionRevertedError
+    const cause = new ContractFunctionRevertedError({
+      abi: AGENT_VAULT_ABI,
+      data: encodeErrorResult({ abi: AGENT_VAULT_ABI, errorName: "ExceedsPerTxCap" }),
+      functionName: "pay",
     });
-
-    const revertError = Object.assign(new Error("ContractFunctionRevertedError"), {
-      name: "ContractFunctionRevertedError",
-      cause: { errorName: "ExceedsPerTxCap", data: errData },
+    const revertError = new ContractFunctionExecutionError(cause, {
+      abi: AGENT_VAULT_ABI,
+      functionName: "pay",
+      args: [],
     });
 
     const publicClient = {
@@ -181,6 +189,7 @@ describe("runTask (research agent)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
     expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error kind");
     expect(result.message).toMatch(/tier/i);
   });
 
@@ -194,6 +203,7 @@ describe("runTask (research agent)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
     expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error kind");
     expect(result.message).toMatch(/non-empty/i);
   });
 
@@ -218,6 +228,7 @@ describe("runTask (research agent)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
     expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error kind");
     expect(result.message).toMatch(/gas/i);
 
     expect(walletClient.writeContract).not.toHaveBeenCalled();
@@ -249,5 +260,157 @@ describe("runTask (research agent)", () => {
     expect(amount).toBe(parseUnits("0.05", 6));
     // Must NOT be anything from the model (which has no way to set amount)
     expect(amount).not.toBe(parseUnits("999", 6));
+  });
+
+  // ── Defect 2: viem error decoding ─────────────────────────────────────────
+
+  it("decodes a real viem revert into ExceedsPerTxCap", async () => {
+    const cause = new ContractFunctionRevertedError({
+      abi: AGENT_VAULT_ABI,
+      data: encodeErrorResult({ abi: AGENT_VAULT_ABI, errorName: "ExceedsPerTxCap" }),
+      functionName: "pay",
+    });
+    const err = new ContractFunctionExecutionError(cause, {
+      abi: AGENT_VAULT_ABI,
+      functionName: "pay",
+      args: [],
+    });
+
+    const publicClient = {
+      getBalance: vi.fn().mockResolvedValue(10n ** 17n),
+      simulateContract: vi.fn().mockRejectedValue(err),
+      waitForTransactionReceipt: vi.fn(),
+    };
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
+    const fetchMock = vi.fn();
+
+    const deps = makeDeps({
+      publicClient: publicClient as unknown as ResearchDeps["publicClient"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") throw new Error("expected rejected");
+    expect(result.reason).toBe("ExceedsPerTxCap");
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("decodes a real viem revert into ExceedsDailyCap", async () => {
+    const cause = new ContractFunctionRevertedError({
+      abi: AGENT_VAULT_ABI,
+      data: encodeErrorResult({ abi: AGENT_VAULT_ABI, errorName: "ExceedsDailyCap" }),
+      functionName: "pay",
+    });
+    const err = new ContractFunctionExecutionError(cause, {
+      abi: AGENT_VAULT_ABI,
+      functionName: "pay",
+      args: [],
+    });
+
+    const publicClient = {
+      getBalance: vi.fn().mockResolvedValue(10n ** 17n),
+      simulateContract: vi.fn().mockRejectedValue(err),
+      waitForTransactionReceipt: vi.fn(),
+    };
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
+
+    const deps = makeDeps({
+      publicClient: publicClient as unknown as ResearchDeps["publicClient"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") throw new Error("expected rejected");
+    expect(result.reason).toBe("ExceedsDailyCap");
+  });
+
+  it("RPC failure during simulate returns error, not rejected", async () => {
+    const rpcErr = new HttpRequestError({ url: "https://rpc", details: "fetch failed" });
+
+    const publicClient = {
+      getBalance: vi.fn().mockResolvedValue(10n ** 17n),
+      simulateContract: vi.fn().mockRejectedValue(rpcErr),
+      waitForTransactionReceipt: vi.fn(),
+    };
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
+    const fetchMock = vi.fn();
+
+    const deps = makeDeps({
+      publicClient: publicClient as unknown as ResearchDeps["publicClient"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("error");
+    // Must NOT be "rejected" — RPC failure is not a contract revert
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── Defect 3: reverted receipt ────────────────────────────────────────────
+
+  it("reverted payment receipt returns error and skips specialist", async () => {
+    const publicClient = {
+      getBalance: vi.fn().mockResolvedValue(10n ** 17n),
+      simulateContract: vi.fn().mockResolvedValue({ result: undefined }),
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "reverted" }),
+    };
+    const walletClient = {
+      account: { address: AGENT },
+      writeContract: vi.fn().mockResolvedValue(TX_HASH),
+    };
+    const fetchMock = vi.fn();
+
+    const deps = makeDeps({
+      publicClient: publicClient as unknown as ResearchDeps["publicClient"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this document", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error kind");
+    expect(result.message).toMatch(/reverted/i);
+    // Specialist must NOT have been called
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── Defect 4: non-2xx specialist response ─────────────────────────────────
+
+  it("surfaces specialist refusal reason", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 402,
+      json: async () => ({ reason: "Job ID mismatch: computed ID does not match the log" }),
+    });
+
+    const deps = makeDeps({
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this document", deps);
+
+    // ok: true because the payment completed on-chain
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.result).toContain("Specialist did not deliver");
+    expect(result.result).toContain("Job ID mismatch");
   });
 });

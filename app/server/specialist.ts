@@ -105,7 +105,7 @@ export async function serveJob(body: ServeJobBody, deps: SpecialistDeps): Promis
       : `You are an expert specialist. Handle this task:\n\n${request}`;
 
   const msg = await anthropic.messages.create({
-    model: "claude-haiku-4-5",
+    model: config.anthropicModel,
     max_tokens: 1024,
     messages: [{ role: "user", content: prompt }],
   });

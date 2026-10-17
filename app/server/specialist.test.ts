@@ -187,4 +187,33 @@ describe("serveJob (specialist agent)", () => {
     if (result.ok) throw new Error("expected not ok");
     expect(result.reason).toMatch(/underpayment/i);
   });
+
+  // ── Defect 5: specialist must use configured model ─────────────────────────
+
+  it("specialist uses configured model", async () => {
+    const capturedCalls: unknown[] = [];
+    const anthropic = {
+      messages: {
+        create: vi.fn().mockImplementation((args: unknown) => {
+          capturedCalls.push(args);
+          return Promise.resolve({
+            content: [{ type: "text", text: "result" }],
+          });
+        }),
+      },
+    };
+
+    const customModel = "claude-opus-4-5";
+    const deps: SpecialistDeps = {
+      ...makeDeps(),
+      anthropic: anthropic as unknown as SpecialistDeps["anthropic"],
+      config: { ...BASE_CONFIG, anthropicModel: customModel },
+    };
+
+    await serveJob(VALID_BODY, deps);
+
+    expect(capturedCalls.length).toBe(1);
+    const call = capturedCalls[0] as { model: string };
+    expect(call.model).toBe(customModel);
+  });
 });
