@@ -6,6 +6,6 @@ cd "$(dirname "$0")/../app"
 arc-forge test
 arc-forge create contracts/AgentVault.sol:AgentVault \
   --rpc-url https://rpc.testnet.arc.io \
-  --interactive \
+  "${SIGNER:---interactive}" \
   --broadcast \
   --constructor-args 0x3600000000000000000000000000000000000000 "$OWNER_ADDRESS"
