@@ -8,3 +8,4 @@ app/contracts/cache/
 app/dist/
 app/.arc-studio/
 .vercel/
+.cursor/
