@@ -1,12 +1,18 @@
-import { useEffect, useState, useRef } from 'react'
-import { createPublicClient, http, parseAbiItem, decodeEventLog } from 'viem'
-import { ExternalLink, Activity } from 'lucide-react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPublicClient, http, decodeEventLog } from 'viem'
+import { ExternalLink } from 'lucide-react'
 import { AGENT_VAULT_ABI } from '../../server/abi'
 import { CHAIN, VAULT_ADDRESS, VAULT_DEPLOY_BLOCK, EXPLORER_BASE } from '../lib/env'
 import { formatUsdc } from '../lib/usdc'
+import { scanAllLogs } from '../lib/scanLogs'
+import { fetchExplorerLogs } from '../lib/explorerLogs'
+import type { ScanProgress } from '../lib/scanLogs'
 
-// The shape of a decoded Paid event from the vault
-type PaidEntry = {
+// ---------------------------------------------------------------------------
+// Types (also exported for App.tsx)
+// ---------------------------------------------------------------------------
+
+export type PaidEntry = {
   id: string
   agent: string
   payee: string
@@ -19,7 +25,6 @@ type PaidEntry = {
   source: 'onchain' | 'session'
 }
 
-// Session-only rejection entries (not stored onchain)
 export type RejectionEntry = {
   id: string
   reason: string
@@ -31,13 +36,60 @@ export type RejectionEntry = {
 
 export type FeedEntry = PaidEntry | RejectionEntry
 
-interface Props {
-  sessionRejections: RejectionEntry[]
+// ---------------------------------------------------------------------------
+// Server response type (from /api/activity)
+// ---------------------------------------------------------------------------
+
+interface ServerPayment {
+  txHash: string
+  logIndex: number
+  blockNumber: string
+  timestamp: number | null
+  agent: string
+  payee: string
+  amount: string     // decimal string, 6-decimal units
+  jobId: string
+  memo: string
 }
 
-const PAID_EVENT = parseAbiItem(
-  'event Paid(address indexed agent, address indexed payee, uint256 amount, bytes32 indexed jobId, string memo)',
-)
+interface ActivityApiResponse {
+  source: 'explorer' | 'rpc-recent'
+  payments: ServerPayment[]
+  error?: string
+}
+
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
+
+interface Props {
+  sessionRejections: RejectionEntry[]
+  /** Increment to force an immediate refresh (e.g. after a task completes) */
+  refreshTick?: number
+  /**
+   * When a task just completed and produced a payment, pass it here so it
+   * shows immediately without waiting for the cache to expire.
+   */
+  latestPayment?: {
+    txHash: string
+    agent: string
+    payee: string
+    amountUsdc: string
+    memo?: string
+  } | null
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const REFRESH_MS = 30_000
+const RPC_RECENT_BLOCKS = 20_000n
+const BATCH_SIZE = 2_000n
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function formatTime(ts: number | undefined, blockNumber: bigint): string {
   if (ts) return new Date(ts * 1000).toLocaleTimeString()
@@ -45,195 +97,411 @@ function formatTime(ts: number | undefined, blockNumber: bigint): string {
 }
 
 function shortAddr(addr: string): string {
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
 }
 
-export function ActivityFeed({ sessionRejections }: Props) {
+function serverPaymentToEntry(p: ServerPayment): PaidEntry {
+  return {
+    id: `${p.txHash}-${p.logIndex}`,
+    agent: p.agent,
+    payee: p.payee,
+    amount: BigInt(p.amount),
+    jobId: p.jobId,
+    memo: p.memo,
+    blockNumber: BigInt(p.blockNumber),
+    txHash: p.txHash,
+    timestamp: p.timestamp ?? undefined,
+    source: 'onchain',
+  }
+}
+
+function decodePaidEntryFromRpc(log: unknown): PaidEntry | null {
+  try {
+    const l = log as {
+      data: `0x${string}`
+      topics: [`0x${string}`, ...`0x${string}`[]]
+      blockNumber: bigint | null
+      transactionHash: `0x${string}` | null
+      logIndex: number | null
+    }
+    const decoded = decodeEventLog({
+      abi: AGENT_VAULT_ABI,
+      data: l.data,
+      topics: l.topics,
+      eventName: 'Paid',
+    })
+    return {
+      id: `${l.transactionHash ?? 'unknown'}-${l.logIndex ?? 0}`,
+      agent: String(decoded.args.agent),
+      payee: String(decoded.args.payee),
+      amount: BigInt(String(decoded.args.amount)),
+      jobId: String(decoded.args.jobId),
+      memo: String(decoded.args.memo),
+      blockNumber: l.blockNumber ?? 0n,
+      txHash: l.transactionHash ?? '',
+      source: 'onchain',
+    }
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+/* oxlint-disable react/set-state-in-effect */
+export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: Props) {
   const [paidEvents, setPaidEvents] = useState<PaidEntry[]>([])
-  const [loading, setLoading] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const [progress, setProgress] = useState<{ pct: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [rpcRecent, setRpcRecent] = useState(false)
+
   const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
+  // ── Main load ──────────────────────────────────────────────────────────────
+  const runLoad = useCallback(async () => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
 
-    const load = async () => {
-      setLoading(true)
-      setError(null)
-      try {
-        const client = createPublicClient({ chain: CHAIN, transport: http() })
-        const latest = await client.getBlockNumber()
+    if (!mountedRef.current) return
+    setScanning(true)
+    setError(null)
+    setProgress(null)
+    setRpcRecent(false)
 
-        const fromBlock = VAULT_DEPLOY_BLOCK > 0n ? VAULT_DEPLOY_BLOCK : latest > 5000n ? latest - 5000n : 0n
+    // ── Path 1: Server endpoint /api/activity ────────────────────────────
+    try {
+      const r = await fetch('/api/activity', { signal: ctrl.signal })
 
-        // Batch in ranges to avoid RPC limits
-        const BATCH = 2000n
-        const entries: PaidEntry[] = []
+      if (r.status === 404) {
+        // Dev mode without Vercel functions — fall through to client fallback
+        throw Object.assign(new Error('404'), { status: 404 })
+      }
 
-        for (let from = fromBlock; from <= latest; from += BATCH) {
-          if (cancelled) break
-          const to = from + BATCH - 1n < latest ? from + BATCH - 1n : latest
-          const logs = await client.getLogs({
-            address: VAULT_ADDRESS,
-            event: PAID_EVENT,
-            fromBlock: from,
-            toBlock: to,
-          })
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({})) as { error?: string }
+        throw new Error(body.error ?? `HTTP ${r.status}`)
+      }
 
-          for (const log of logs) {
-            try {
-              const decoded = decodeEventLog({
-                abi: AGENT_VAULT_ABI,
-                data: log.data,
-                topics: log.topics,
-                eventName: 'Paid',
-              })
-              entries.push({
-                id: `${log.transactionHash}-${log.logIndex}`,
-                agent: decoded.args.agent,
-                payee: decoded.args.payee,
-                amount: decoded.args.amount,
-                jobId: decoded.args.jobId,
-                memo: decoded.args.memo,
-                blockNumber: log.blockNumber ?? 0n,
-                txHash: log.transactionHash ?? '',
-                source: 'onchain',
-              })
-            } catch {
-              // skip undecodeable log
-            }
-          }
-        }
+      const data = await r.json() as ActivityApiResponse
 
-        if (!cancelled && mountedRef.current) {
-          // newest first
-          entries.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : 1))
-          setPaidEvents(entries)
-        }
-      } catch (err) {
-        if (!cancelled && mountedRef.current) {
-          setError(err instanceof Error ? err.message : 'Failed to load events')
-        }
-      } finally {
-        if (!cancelled && mountedRef.current) setLoading(false)
+      if (ctrl.signal.aborted || !mountedRef.current) return
+
+      const entries = data.payments.map(serverPaymentToEntry)
+      setPaidEvents(entries)
+      setRpcRecent(data.source === 'rpc-recent')
+      setScanning(false)
+      return
+    } catch (apiErr) {
+      if (ctrl.signal.aborted) return
+      // 404 → fall through to client paths; other errors → also fall through
+      const is404 = (apiErr as { status?: number }).status === 404
+      if (!is404) {
+        console.warn('[ActivityFeed] /api/activity failed, trying client-side fallback:', apiErr)
       }
     }
 
-    void load()
-    const interval = setInterval(() => void load(), 30_000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
+    // ── Path 2: Client-side explorer API ────────────────────────────────
+    if (EXPLORER_BASE) {
+      try {
+        const entries = await fetchExplorerLogs(
+          EXPLORER_BASE,
+          VAULT_ADDRESS,
+          VAULT_DEPLOY_BLOCK,
+          { fetch: (url) => fetch(url) },
+        )
+        if (!ctrl.signal.aborted && mountedRef.current) {
+          setPaidEvents(entries)
+          setScanning(false)
+        }
+        return
+      } catch (explorerErr) {
+        console.warn('[ActivityFeed] Client explorer API failed, falling back to RPC scan:', explorerErr)
+      }
+    }
+
+    // ── Path 3: RPC scan — most recent 20,000 blocks only ───────────────
+    try {
+      const client = createPublicClient({ chain: CHAIN, transport: http() })
+      const head = await client.getBlockNumber()
+      const startBlock = head > RPC_RECENT_BLOCKS ? head - RPC_RECENT_BLOCKS : 0n
+
+      if (startBlock > head) {
+        if (mountedRef.current && !ctrl.signal.aborted) {
+          setScanning(false)
+          setRpcRecent(true)
+        }
+        return
+      }
+
+      const { logs } = await scanAllLogs(
+        startBlock,
+        head,
+        BATCH_SIZE,
+        {
+          getLogs: async (range) => {
+            return client.getLogs({
+              address: VAULT_ADDRESS,
+              event: {
+                type: 'event',
+                name: 'Paid',
+                inputs: [
+                  { type: 'address', name: 'agent', indexed: true },
+                  { type: 'address', name: 'payee', indexed: true },
+                  { type: 'uint256', name: 'amount' },
+                  { type: 'bytes32', name: 'jobId', indexed: true },
+                  { type: 'string', name: 'memo' },
+                ],
+              },
+              fromBlock: range.fromBlock,
+              toBlock: range.toBlock,
+            })
+          },
+          sleep: async (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+        },
+        (p: ScanProgress) => {
+          if (!mountedRef.current || ctrl.signal.aborted) return
+          const total = Number(p.total)
+          const scanned = Number(p.scanned)
+          const pct = total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : 100
+          setProgress({ pct })
+          const partial = (p.logs as unknown[]).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
+          partial.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : 1))
+          setPaidEvents(partial)
+        },
+        ctrl.signal,
+      )
+
+      if (!ctrl.signal.aborted && mountedRef.current) {
+        setProgress(null)
+        setRpcRecent(true)
+        const finalEntries = (logs as unknown[]).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
+        finalEntries.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : 1))
+        setPaidEvents(finalEntries)
+      }
+    } catch (err) {
+      if (ctrl.signal.aborted) return
+      if (!mountedRef.current) return
+      console.error('[ActivityFeed] All sources failed:', err)
+      setError("Couldn't load payment history from the Arc network.")
+    } finally {
+      if (!ctrl.signal.aborted && mountedRef.current) {
+        setScanning(false)
+      }
     }
   }, [])
 
-  // Merge: session rejections newest-first at the top, then onchain paid events
-  const rejectionItems = [...sessionRejections].sort((a, b) => b.ts - a.ts)
+  // ── Initial load + 30 s interval (tab-visible only) ───────────────────────
+  useEffect(() => {
+    void runLoad()
 
-  const isEmpty = paidEvents.length === 0 && rejectionItems.length === 0 && !loading
+    const interval = setInterval(() => {
+      if (!document.hidden) void runLoad()
+    }, REFRESH_MS)
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) void runLoad()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      abortRef.current?.abort()
+    }
+  }, [runLoad])
+
+  // ── Trigger refresh when the parent increments refreshTick ────────────────
+  const prevTick = useRef(refreshTick)
+  useEffect(() => {
+    if (refreshTick !== undefined && refreshTick !== prevTick.current) {
+      prevTick.current = refreshTick
+      void runLoad()
+    }
+  }, [refreshTick, runLoad])
+
+  // ── Prepend just-completed payment immediately (deduped by txHash) ────────
+  const prevPayment = useRef(latestPayment)
+  useEffect(() => {
+    if (
+      latestPayment &&
+      latestPayment !== prevPayment.current &&
+      latestPayment.txHash
+    ) {
+      prevPayment.current = latestPayment
+      setPaidEvents((prev) => {
+        if (prev.some((e) => e.txHash === latestPayment.txHash)) return prev
+        // Convert amountUsdc string like "$0.05" to bigint 6-decimal units
+        const amountRaw = latestPayment.amountUsdc.replace(/[^0-9.]/g, '')
+        const [intPart = '0', fracPart = ''] = amountRaw.split('.')
+        const padded = fracPart.padEnd(6, '0').slice(0, 6)
+        const amountBigint = BigInt(intPart) * 1_000_000n + BigInt(padded)
+        const entry: PaidEntry = {
+          id: `${latestPayment.txHash}-0`,
+          agent: latestPayment.agent,
+          payee: latestPayment.payee,
+          amount: amountBigint,
+          jobId: '',
+          memo: latestPayment.memo ?? '',
+          blockNumber: 0n,
+          txHash: latestPayment.txHash,
+          timestamp: Math.floor(Date.now() / 1000),
+          source: 'onchain',
+        }
+        return [entry, ...prev]
+      })
+    }
+  }, [latestPayment])
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const rejectionItems = [...sessionRejections].sort((a, b) => b.ts - a.ts)
+  const hasRows = paidEvents.length > 0 || rejectionItems.length > 0
+  const isEmpty = !hasRows && !scanning && !error
 
   return (
-    <section className="rounded-2xl p-5" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-      <div className="mb-4 flex items-center gap-2">
-        <Activity className="size-4" style={{ color: 'var(--muted)' }} />
-        <h2 className="display text-lg font-bold" style={{ color: 'var(--ink)', letterSpacing: '-0.02em' }}>
-          Activity
-        </h2>
-        {loading && (
-          <span className="text-xs" style={{ color: 'var(--muted)' }}>Loading...</span>
-        )}
-      </div>
-
+    <div>
+      {/* Error state */}
       {error && (
-        <p className="mb-3 rounded-xl px-3 py-2 text-xs" style={{ background: 'rgba(186,43,76,0.07)', color: 'var(--danger)' }}>
-          {error}
-        </p>
-      )}
-
-      {isEmpty && !loading && (
-        <p className="py-6 text-center text-sm" style={{ color: 'var(--muted)' }}>
-          No activity yet.
-        </p>
-      )}
-
-      <div className="flex flex-col gap-2">
-        {/* Session rejections */}
-        {rejectionItems.map((r) => (
-          <div
-            key={r.id}
-            className="rounded-xl p-3"
-            style={{ background: 'rgba(186,43,76,0.06)', border: '1px solid rgba(186,43,76,0.14)' }}
+        <div
+          className="mb-4 flex items-center justify-between p-4"
+          style={{
+            background: 'rgba(112,39,24,0.05)',
+            border: '1px solid rgba(112,39,24,0.18)',
+            borderRadius: 4,
+          }}
+        >
+          <p className="text-sm" style={{ color: 'var(--burnt)' }}>{error}</p>
+          <button
+            onClick={() => void runLoad()}
+            className="btn btn-secondary btn-sm ml-4 shrink-0"
+            style={{ fontSize: 13 }}
           >
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <span
-                  className="text-xs font-semibold"
-                  style={{ color: 'var(--danger)' }}
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Scanning progress (RPC fallback only) */}
+      {scanning && progress && (
+        <p className="mb-3 text-xs tabular-nums" style={{ color: 'var(--details)' }}>
+          Scanning blocks… {progress.pct}%
+        </p>
+      )}
+
+      {/* Initial loading */}
+      {scanning && !hasRows && !progress && (
+        <p className="py-4 text-sm" style={{ color: 'var(--details)' }}>Loading…</p>
+      )}
+
+      {/* Empty state */}
+      {isEmpty && (
+        <p className="py-8 text-center text-sm" style={{ color: 'var(--details)' }}>
+          No payments yet. Run a task to see the first one.
+        </p>
+      )}
+
+      {/* Table */}
+      {hasRows && (
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr style={{ borderBottom: '1px solid var(--hash)' }}>
+              {['Time', 'Agent', 'Payee', 'Amount', 'Memo', ''].map((h) => (
+                <th
+                  key={h}
+                  className="arc-label pb-2 pt-0 text-left text-[10px]"
+                  style={{ paddingRight: 12 }}
                 >
-                  Rejected
-                </span>
-                <span className="ml-2 text-xs" style={{ color: 'var(--ink-2)' }}>
-                  {r.reason}
-                  {r.tier && ` · ${r.tier}`}
-                  {r.amountUsdc && ` · $${r.amountUsdc}`}
-                </span>
-              </div>
-              <span className="flex-shrink-0 text-xs tabular-nums" style={{ color: 'var(--muted)' }}>
-                {new Date(r.ts).toLocaleTimeString()}
-              </span>
-            </div>
-          </div>
-        ))}
+                  {h && (
+                    <>
+                      <span className="arc-label-bracket">[</span>
+                      {h}
+                      <span className="arc-label-bracket">]</span>
+                    </>
+                  )}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {/* Session rejections at top */}
+            {rejectionItems.map((r) => (
+              <tr key={r.id} style={{ borderBottom: '1px solid var(--hash)' }}>
+                <td className="mono py-3 pr-3 text-xs tabular-nums" style={{ color: 'var(--details)' }}>
+                  {new Date(r.ts).toLocaleTimeString()}
+                </td>
+                <td className="py-3 pr-3 text-xs" style={{ color: 'var(--details)' }}>—</td>
+                <td className="py-3 pr-3 text-xs" style={{ color: 'var(--details)' }}>—</td>
+                <td className="mono py-3 pr-3 text-xs tabular-nums" style={{ color: 'var(--details)' }}>
+                  {r.amountUsdc ? `$${r.amountUsdc}` : '—'}
+                </td>
+                <td className="py-3 pr-3 text-xs" style={{ color: 'var(--burnt)' }}>
+                  Rejected — {r.reason}{r.tier ? ` · ${r.tier}` : ''}
+                </td>
+                <td className="py-3" />
+              </tr>
+            ))}
 
-        {/* Onchain paid events */}
-        {paidEvents.map((e) => (
-          <div
-            key={e.id}
-            className="rounded-xl p-3"
-            style={{ background: 'var(--surface-muted)', border: '1px solid var(--border)' }}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-baseline gap-2">
-                  <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--success)' }}>
-                    +{formatUsdc(e.amount)}
-                  </span>
-                  <span className="truncate text-xs" style={{ color: 'var(--muted)' }}>
-                    to {shortAddr(e.payee)}
-                  </span>
-                </div>
-                {e.memo && (
-                  <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-2)' }}>{e.memo}</p>
-                )}
-                <p className="mt-0.5 text-xs" style={{ color: 'var(--muted)' }}>
-                  from {shortAddr(e.agent)}
-                </p>
-              </div>
-              <div className="flex flex-shrink-0 flex-col items-end gap-1">
-                <span className="text-xs tabular-nums" style={{ color: 'var(--muted)' }}>
+            {/* Onchain paid events */}
+            {paidEvents.map((e) => (
+              <tr
+                key={e.id}
+                className="group"
+                style={{ borderBottom: '1px solid var(--hash)' }}
+              >
+                <td className="mono py-3 pr-3 text-xs tabular-nums" style={{ color: 'var(--details)' }}>
                   {formatTime(e.timestamp, e.blockNumber)}
-                </span>
-                {e.txHash && EXPLORER_BASE && (
-                  <a
-                    href={`${EXPLORER_BASE}/tx/${e.txHash}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-0.5 text-xs"
-                    style={{ color: 'var(--accent-hover)' }}
-                  >
-                    tx <ExternalLink className="size-2.5" />
-                  </a>
-                )}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
+                </td>
+                <td className="mono py-3 pr-3 text-xs" style={{ color: 'var(--ink)' }}>
+                  {shortAddr(e.agent)}
+                </td>
+                <td className="mono py-3 pr-3 text-xs" style={{ color: 'var(--ink)' }}>
+                  {shortAddr(e.payee)}
+                </td>
+                <td className="mono py-3 pr-3 text-xs tabular-nums font-medium" style={{ color: 'var(--success)' }}>
+                  +{formatUsdc(e.amount)}
+                </td>
+                <td className="py-3 pr-3 text-xs" style={{ color: 'var(--details)', maxWidth: 200 }}>
+                  <span className="line-clamp-1">{e.memo || '—'}</span>
+                </td>
+                <td className="py-3">
+                  {e.txHash && EXPLORER_BASE && (
+                    <a
+                      href={`${EXPLORER_BASE}/tx/${e.txHash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs transition-all"
+                      style={{ color: 'var(--blue)' }}
+                      aria-label="View transaction on explorer"
+                    >
+                      <ExternalLink className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+                    </a>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Quiet note when source is rpc-recent */}
+      {rpcRecent && hasRows && (
+        <p className="mt-3 text-xs" style={{ color: 'var(--details)' }}>
+          Showing payments from the last few hours.
+        </p>
+      )}
+    </div>
   )
 }
+/* oxlint-enable react/set-state-in-effect */

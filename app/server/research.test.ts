@@ -33,6 +33,8 @@ const BASE_CONFIG: Config = {
   anthropicApiKey: "sk-test",
   anthropicModel: "claude-haiku-4-5",
   publicBaseUrl: "https://example.com",
+  vaultDeployBlock: 0n,
+  blockscoutApiKey: undefined,
 };
 
 // ── Anthropic fake helpers ────────────────────────────────────────────────────

@@ -24,6 +24,10 @@ export interface Config {
   anthropicApiKey: string;
   anthropicModel: string;
   publicBaseUrl: string;
+  /** Optional: block the vault contract was deployed at (default 0n) */
+  vaultDeployBlock: bigint;
+  /** Optional: Blockscout API key to raise the explorer rate limit */
+  blockscoutApiKey: string | undefined;
 }
 
 export function loadConfig(): Config {
@@ -47,5 +51,7 @@ export function loadConfig(): Config {
     anthropicApiKey: requireEnv("ANTHROPIC_API_KEY"),
     anthropicModel: optionalEnv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
     publicBaseUrl: requireEnv("PUBLIC_BASE_URL"),
+    vaultDeployBlock: BigInt(optionalEnv("VAULT_DEPLOY_BLOCK", "0")),
+    blockscoutApiKey: process.env["BLOCKSCOUT_API_KEY"] || undefined,
   };
 }

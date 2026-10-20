@@ -2,40 +2,231 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Arc design tokens ─────────────────────────────────────────────────────── */
 :root {
-  --bg: #ffffff;
-  --bg-gradient: linear-gradient(180deg, #f9f9fc 0%, #fffcf7 52%, #fbf7f2 100%);
-  --surface: rgba(255, 255, 255, 0.72);
-  --surface-strong: rgba(255, 255, 255, 0.90);
-  --surface-muted: #f5f5f8;
-  --ink: #122d45;
-  --ink-2: #334155;
-  --muted: #6b6580;
-  --subtle: #8a849c;
-  --border: rgba(18, 45, 69, 0.12);
-  --border-strong: rgba(25, 53, 77, 0.50);
-  --accent: #122d45;
-  --accent-hover: #1061a6;
-  --focus: #85b1ed;
-  --success: #1a8047;
-  --danger: #ba2b4c;
+  /* brand palette */
+  --navy:       #1B3158;
+  --blue:       #2F578C;
+  --sky:        #ACC6E9;
+  --ether:      #D5E0E7;
+  --hash:       #DDD6DD;
+  --gray-700:   #41464C;
+  --details:    #5B636B;
+  --gold:       #E9A13F;
+  --burnt:      #702718;
+
+  /* semantic aliases (used throughout components) */
+  --bg:         #FFFFFF;
+  --ink:        #1B3158;
+  --ink-2:      #41464C;
+  --muted:      #5B636B;
+  --subtle:     #8a8fa6;
+  --border:     #DDD6DD;
+  --accent:     #000000;
+  --accent-hover: #292929;
+  --success:    #1a6e3c;
+  --danger:     #702718;
+
+  /* hero gradient */
+  --hero-bg: linear-gradient(180deg, #A7D9FA 0%, #FBF5F0 100%);
+  /* dark band */
+  --dark-bg: linear-gradient(180deg, #163756 25%, #153655 43%, #416D91 83%, #75A8AE 100%);
 }
 
-* {
-  box-sizing: border-box;
-}
+/* ── Base ───────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
   font-family: 'DM Sans', sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
   min-height: 100dvh;
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
 }
 
+/* ── Type helpers ───────────────────────────────────────────────────────────── */
 .display {
   font-family: 'Space Grotesk', sans-serif;
-  letter-spacing: -0.03em;
+}
+.mono, .mono * {
+  font-family: 'Space Mono', monospace;
 }
 
-.mono {
-  font-family: 'JetBrains Mono', Menlo, monospace;
+/* ── Arc grid crosshair corners ─────────────────────────────────────────────── */
+/* Applied via .grid-cell on panel containers */
+.grid-cell {
+  position: relative;
+  border: 1px solid var(--hash);
 }
+.grid-cell::before,
+.grid-cell::after {
+  content: '+';
+  position: absolute;
+  font-size: 10px;
+  line-height: 1;
+  color: #C9C3C9;
+  pointer-events: none;
+  z-index: 1;
+}
+.grid-cell::before { top: -6px; left: -4px; }
+.grid-cell::after  { top: -6px; right: -4px; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 12px 24px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s, opacity 0.2s;
+  text-decoration: none;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.btn:focus-visible {
+  outline: 2px solid #2F578C;
+  outline-offset: 2px;
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Primary: black */
+.btn-primary {
+  background: #000;
+  color: #fff;
+  border-color: #000;
+}
+.btn-primary:hover:not(:disabled) { background: #292929; border-color: #292929; }
+
+/* Secondary: outline */
+.btn-secondary {
+  background: transparent;
+  color: #000;
+  border-color: #000;
+}
+.btn-secondary:hover:not(:disabled) { background: rgba(0,0,0,0.04); }
+
+/* Tertiary: sky fill */
+.btn-tertiary {
+  background: #ACC6E9;
+  color: #000;
+  border-color: #ACC6E9;
+}
+.btn-tertiary:hover:not(:disabled) { background: #92b7e0; border-color: #92b7e0; }
+
+/* Small variant */
+.btn-sm {
+  padding: 8px 16px;
+  font-size: 14px;
+}
+
+/* ── Chips (Space Mono, uppercase, navy outline) ────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Space Mono', monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #2F578C;
+  color: #2F578C;
+  background: transparent;
+  white-space: nowrap;
+}
+.chip-active {
+  background: #2F578C;
+  color: #fff;
+}
+
+/* ── Mono label: [BRACKETS] with gold brackets ──────────────────────────────── */
+.arc-label {
+  font-family: 'Space Mono', monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: #1B3158;
+}
+.arc-label-bracket {
+  color: #E9A13F;
+}
+
+/* ── Focus ring on all interactive ──────────────────────────────────────────── */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid #2F578C;
+  outline-offset: 2px;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────────── */
+.arc-input {
+  width: 100%;
+  background: #fff;
+  border: 1px solid var(--hash);
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.arc-input:focus { border-color: #2F578C; }
+.arc-input::placeholder { color: #9ca3af; }
+.arc-input:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Progress bar ────────────────────────────────────────────────────────────── */
+.progress-bar {
+  height: 3px;
+  background: var(--ether);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #2F578C;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ── Section sizing ──────────────────────────────────────────────────────────── */
+.section-pad {
+  padding-top: 120px;
+  padding-bottom: 120px;
+}
+@media (max-width: 900px) {
+  .section-pad { padding-top: 72px; padding-bottom: 72px; }
+}
+
+.content-wrap {
+  max-width: 1216px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 32px;
+  padding-right: 32px;
+}
+@media (max-width: 600px) {
+  .content-wrap { padding-left: 20px; padding-right: 20px; }
+}
+
+/* ── Dark band text overrides ────────────────────────────────────────────────── */
+.dark-band { background: var(--dark-bg); color: #fff; }
+.dark-band .arc-label { color: #ACC6E9; }
+.dark-band .arc-label-bracket { color: #E9A13F; }

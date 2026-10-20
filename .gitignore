@@ -9,3 +9,4 @@ app/dist/
 app/.arc-studio/
 .vercel/
 .cursor/
+.DS_Store
