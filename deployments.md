@@ -5,6 +5,10 @@
 - Project URL: https://studio.arc.io/app/e14093ad-b80d-4905-a1ef-54cea32aa8a2
 - Session: `agent-paymaster`
 
+## Live app
+
+- https://arc-microgrants-tan.vercel.app (Vercel, deployed from GitHub `main`, root directory `app`)
+
 ## AgentVault
 
 | Network | Address | Deploy tx | Owner | Notes |
