@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react'
 import { Nav } from './components/Nav'
+import { WrongNetworkBanner } from './components/WrongNetworkBanner'
 import { HeroSection } from './components/HeroSection'
 import { VaultPanel } from './components/VaultPanel'
 import { AgentsPanel } from './components/AgentsPanel'
@@ -126,6 +127,7 @@ export default function App() {
   return (
     <div className="min-h-dvh" style={{ background: '#fff' }}>
       <Nav activeSection={activeSection} onActiveSection={handleActiveSection} />
+      <WrongNetworkBanner />
 
       {/* 1 — Overview (hero) */}
       <div style={{ paddingTop: NAV_HEIGHT }}>

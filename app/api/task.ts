@@ -1,10 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createPublicClient, createWalletClient, http } from "viem";
+import { createPublicClient, createWalletClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arc, arcTestnet } from "viem/chains";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomBytes } from "crypto";
 import { loadConfig } from "../server/config.js";
+import { makeTransport } from "../server/transport.js";
 import { runTask } from "../server/research.js";
 import type { Hex } from "viem";
 
@@ -31,9 +32,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   const chain = config.chain === "arc" ? arc : arcTestnet;
   const account = privateKeyToAccount(config.researchAgentPrivateKey);
+  const transport = makeTransport(config);
 
-  const publicClient = createPublicClient({ chain, transport: http(config.rpcUrl) });
-  const walletClient = createWalletClient({ account, chain, transport: http(config.rpcUrl) });
+  const publicClient = createPublicClient({ chain, transport });
+  const walletClient = createWalletClient({ account, chain, transport });
   const anthropic = new Anthropic({ apiKey: config.anthropicApiKey });
 
   const result = await runTask(body.task, {

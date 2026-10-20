@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
-import { Loader2 } from 'lucide-react'
-import { toast } from 'sonner'
+import { useAccount, useReadContract } from 'wagmi'
 import { AGENT_VAULT_ABI } from '../../server/abi'
 import { CHAIN, VAULT_ADDRESS, RESEARCH_AGENT_ADDRESS, SPECIALIST_ADDRESS } from '../lib/env'
 import { toUsdcUnits, formatUsdc } from '../lib/usdc'
+import { useVaultWrite } from '../lib/useVaultWrite'
 
 type AgentData = {
   perTxCap: bigint
@@ -49,7 +48,13 @@ function ResearchAgentRow() {
   })
 
   const agent: AgentData | undefined = agentRaw
-    ? { perTxCap: agentRaw[0], dailyCap: agentRaw[1], spentInWindow: agentRaw[2], windowStart: agentRaw[3], active: agentRaw[4] }
+    ? {
+        perTxCap: agentRaw[0],
+        dailyCap: agentRaw[1],
+        spentInWindow: agentRaw[2],
+        windowStart: agentRaw[3],
+        active: agentRaw[4],
+      }
     : undefined
 
   const spentPct =
@@ -61,8 +66,12 @@ function ResearchAgentRow() {
     <div className="border-b py-4" style={{ borderColor: 'var(--hash)' }}>
       <div className="mb-2 flex items-center justify-between">
         <div>
-          <p className="text-sm font-medium" style={{ color: 'var(--navy)' }}>Research agent</p>
-          <p className="mono text-xs" style={{ color: 'var(--details)' }}>{shortAddr(RESEARCH_AGENT_ADDRESS)}</p>
+          <p className="text-sm font-medium" style={{ color: 'var(--navy)' }}>
+            Research agent
+          </p>
+          <p className="mono text-xs" style={{ color: 'var(--details)' }}>
+            {shortAddr(RESEARCH_AGENT_ADDRESS)}
+          </p>
         </div>
         {agent ? (
           <span
@@ -76,7 +85,9 @@ function ResearchAgentRow() {
             {agent.active ? 'ACTIVE' : 'INACTIVE'}
           </span>
         ) : (
-          <span className="chip" style={{ color: 'var(--details)', borderColor: 'var(--hash)' }}>NOT SET</span>
+          <span className="chip" style={{ color: 'var(--details)', borderColor: 'var(--hash)' }}>
+            NOT SET
+          </span>
         )}
       </div>
 
@@ -91,16 +102,26 @@ function ResearchAgentRow() {
               <div key={l}>
                 <p className="mb-0.5 text-[10px]" style={{ color: 'var(--details)' }}>
                   <span className="arc-label-bracket">[</span>
-                  <span className="mono" style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}>{l}</span>
+                  <span
+                    className="mono"
+                    style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}
+                  >
+                    {l}
+                  </span>
                   <span className="arc-label-bracket">]</span>
                 </p>
-                <p className="mono text-sm tabular-nums" style={{ color: 'var(--navy)' }}>{value}</p>
+                <p className="mono text-sm tabular-nums" style={{ color: 'var(--navy)' }}>
+                  {value}
+                </p>
               </div>
             ))}
           </div>
           <div>
             <div className="progress-bar mt-1">
-              <div className="progress-bar-fill" style={{ width: `${Math.min(spentPct, 100)}%` }} />
+              <div
+                className="progress-bar-fill"
+                style={{ width: `${Math.min(spentPct, 100)}%` }}
+              />
             </div>
             <p className="mt-0.5 text-xs" style={{ color: 'var(--details)' }}>
               {spentPct}% of daily budget used
@@ -127,17 +148,25 @@ function SpecialistRow() {
     <div className="border-b py-4" style={{ borderColor: 'var(--hash)' }}>
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm font-medium" style={{ color: 'var(--navy)' }}>Specialist</p>
+          <p className="text-sm font-medium" style={{ color: 'var(--navy)' }}>
+            Specialist
+          </p>
           <p className="mono text-xs" style={{ color: 'var(--details)' }}>
             {shortAddr(SPECIALIST_ADDRESS)}
           </p>
         </div>
         {approved === undefined ? (
-          <span className="chip" style={{ color: 'var(--details)', borderColor: 'var(--hash)' }}>…</span>
+          <span className="chip" style={{ color: 'var(--details)', borderColor: 'var(--hash)' }}>
+            …
+          </span>
         ) : approved ? (
-          <span className="chip" style={{ borderColor: '#2F578C', color: '#2F578C' }}>APPROVED</span>
+          <span className="chip" style={{ borderColor: '#2F578C', color: '#2F578C' }}>
+            APPROVED
+          </span>
         ) : (
-          <span className="chip" style={{ borderColor: 'var(--hash)', color: 'var(--details)' }}>NOT APPROVED</span>
+          <span className="chip" style={{ borderColor: 'var(--hash)', color: 'var(--details)' }}>
+            NOT APPROVED
+          </span>
         )}
       </div>
       <p className="mt-1 text-xs" style={{ color: 'var(--details)' }}>
@@ -151,6 +180,10 @@ export function AgentsPanel() {
   const { address, isConnected } = useAccount()
   const [perTxInput, setPerTxInput] = useState('')
   const [dailyInput, setDailyInput] = useState('')
+  const [perTxErr, setPerTxErr] = useState('')
+  const [dailyErr, setDailyErr] = useState('')
+
+  const { run, isBusy } = useVaultWrite()
 
   const { data: owner } = useReadContract({
     address: VAULT_ADDRESS,
@@ -159,33 +192,54 @@ export function AgentsPanel() {
     chainId: CHAIN.id,
   })
 
-  const isOwner = isConnected && address?.toLowerCase() === (owner as string | undefined)?.toLowerCase()
+  const isOwner =
+    isConnected &&
+    address?.toLowerCase() === (owner as string | undefined)?.toLowerCase()
 
-  const { writeContract: setAgent, data: setAgentHash, isPending: setAgentPending } = useWriteContract()
-  const { isLoading: setAgentConfirming, isSuccess: setAgentSuccess } = useWaitForTransactionReceipt({ hash: setAgentHash })
-
-  const { writeContract: setPayee, data: setPayeeHash, isPending: setPayeePending } = useWriteContract()
-  const { isLoading: setPayeeConfirming, isSuccess: setPayeeSuccess } = useWaitForTransactionReceipt({ hash: setPayeeHash })
-
-  const handleSetAgent = () => {
+  // ── Inline cap validation ──────────────────────────────────────────────────
+  function validateCaps(): { perTx: bigint; daily: bigint } | null {
+    setPerTxErr('')
+    setDailyErr('')
     let perTx: bigint, daily: bigint
-    try { perTx = toUsdcUnits(perTxInput) } catch (e) {
-      toast.error(`Per-tx cap: ${e instanceof Error ? e.message : 'Invalid'}`); return
+    try {
+      perTx = toUsdcUnits(perTxInput)
+    } catch (e) {
+      setPerTxErr(e instanceof Error ? e.message : 'Invalid per-tx cap')
+      return null
     }
-    try { daily = toUsdcUnits(dailyInput) } catch (e) {
-      toast.error(`Daily cap: ${e instanceof Error ? e.message : 'Invalid'}`); return
+    if (perTx <= 0n) {
+      setPerTxErr('Per-payment cap must be greater than 0')
+      return null
     }
-    setAgent({
+    try {
+      daily = toUsdcUnits(dailyInput)
+    } catch (e) {
+      setDailyErr(e instanceof Error ? e.message : 'Invalid daily cap')
+      return null
+    }
+    if (daily < perTx) {
+      setDailyErr('Daily cap must be ≥ per-payment cap')
+      return null
+    }
+    return { perTx, daily }
+  }
+
+  const handleSetAgent = async () => {
+    const caps = validateCaps()
+    if (!caps) return
+    await run({
+      action: 'Save agent config',
       address: VAULT_ADDRESS,
       abi: AGENT_VAULT_ABI,
       functionName: 'setAgent',
-      args: [RESEARCH_AGENT_ADDRESS, perTx, daily, true],
+      args: [RESEARCH_AGENT_ADDRESS, caps.perTx, caps.daily, true],
       chainId: CHAIN.id,
     })
   }
 
-  const handleApproveSpecialist = () => {
-    setPayee({
+  const handleApproveSpecialist = async () => {
+    await run({
+      action: 'Approve specialist',
       address: VAULT_ADDRESS,
       abi: AGENT_VAULT_ABI,
       functionName: 'setPayee',
@@ -193,8 +247,6 @@ export function AgentsPanel() {
       chainId: CHAIN.id,
     })
   }
-
-  const busy = setAgentPending || setAgentConfirming
 
   return (
     <div className="grid-cell p-6" style={{ background: '#fff' }}>
@@ -212,7 +264,12 @@ export function AgentsPanel() {
           <div>
             <label className="mb-1.5 block text-[10px]" htmlFor="perTxInput">
               <span className="arc-label-bracket">[</span>
-              <span className="mono" style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}>PER-TX CAP (USDC)</span>
+              <span
+                className="mono"
+                style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}
+              >
+                PER-TX CAP (USDC)
+              </span>
               <span className="arc-label-bracket">]</span>
             </label>
             <input
@@ -221,16 +278,30 @@ export function AgentsPanel() {
               inputMode="decimal"
               placeholder="0.20"
               value={perTxInput}
-              onChange={(e) => setPerTxInput(e.target.value.replace(/[^0-9.]/g, ''))}
+              onChange={(e) => {
+                setPerTxErr('')
+                setPerTxInput(e.target.value.replace(/[^0-9.]/g, ''))
+              }}
               disabled={!isOwner}
               className="arc-input mono"
               aria-label="Per-transaction cap in USDC"
+              aria-invalid={!!perTxErr}
             />
+            {perTxErr && (
+              <p className="mt-0.5 text-xs" role="alert" style={{ color: 'var(--burnt)' }}>
+                {perTxErr}
+              </p>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-[10px]" htmlFor="dailyInput">
               <span className="arc-label-bracket">[</span>
-              <span className="mono" style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}>DAILY CAP (USDC)</span>
+              <span
+                className="mono"
+                style={{ color: 'var(--navy)', letterSpacing: '0.12em' }}
+              >
+                DAILY CAP (USDC)
+              </span>
               <span className="arc-label-bracket">]</span>
             </label>
             <input
@@ -239,29 +310,38 @@ export function AgentsPanel() {
               inputMode="decimal"
               placeholder="5.00"
               value={dailyInput}
-              onChange={(e) => setDailyInput(e.target.value.replace(/[^0-9.]/g, ''))}
+              onChange={(e) => {
+                setDailyErr('')
+                setDailyInput(e.target.value.replace(/[^0-9.]/g, ''))
+              }}
               disabled={!isOwner}
               className="arc-input mono"
               aria-label="Daily cap in USDC"
+              aria-invalid={!!dailyErr}
             />
+            {dailyErr && (
+              <p className="mt-0.5 text-xs" role="alert" style={{ color: 'var(--burnt)' }}>
+                {dailyErr}
+              </p>
+            )}
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button onClick={handleSetAgent} disabled={!isOwner || busy} className="btn btn-primary btn-sm">
-            {busy && <Loader2 className="size-3.5 animate-spin" />}
-            {setAgentPending ? 'Confirm…' : setAgentConfirming ? 'Saving…' : 'Save agent config'}
+          <button
+            onClick={() => void handleSetAgent()}
+            disabled={!isOwner || isBusy}
+            className="btn btn-primary btn-sm"
+          >
+            Save agent config
           </button>
           <button
-            onClick={handleApproveSpecialist}
-            disabled={!isOwner || setPayeePending || setPayeeConfirming}
+            onClick={() => void handleApproveSpecialist()}
+            disabled={!isOwner || isBusy}
             className="btn btn-secondary btn-sm"
           >
-            {(setPayeePending || setPayeeConfirming) && <Loader2 className="size-3.5 animate-spin" />}
-            {setPayeePending ? 'Confirm…' : setPayeeConfirming ? 'Approving…' : 'Approve specialist payee'}
+            Approve specialist payee
           </button>
         </div>
-        {setAgentSuccess && <p className="mt-2 text-sm" style={{ color: 'var(--success)' }}>Agent config saved.</p>}
-        {setPayeeSuccess && <p className="mt-2 text-sm" style={{ color: 'var(--success)' }}>Specialist approved as payee.</p>}
         {!isOwner && isConnected && (
           <p className="mt-3 text-xs" style={{ color: 'var(--details)' }}>
             Connect the owner wallet to change budgets.

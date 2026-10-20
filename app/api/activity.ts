@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createPublicClient, http, toEventSelector } from "viem";
+import { createPublicClient, toEventSelector } from "viem";
 import { arc, arcTestnet } from "viem/chains";
+import { makeTransport } from "../server/transport.js";
 import { loadConfig } from "../server/config.js";
 import { fetchActivity } from "../server/activity.js";
 import type { ExplorerResponse, ActivityDeps, RpcLog } from "../server/activity.js";
@@ -27,7 +28,7 @@ export default async function handler(_req: VercelRequest, res: VercelResponse):
   const viemChain = config.chain === "arc" ? arc : arcTestnet;
   const client = createPublicClient({
     chain: viemChain,
-    transport: http(config.rpcUrl, { batch: true }),
+    transport: makeTransport(config),
   });
 
   const deps: ActivityDeps = {

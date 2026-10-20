@@ -7,29 +7,30 @@
  * retry (4 retries, 800 ms base) so the public RPC is not flooded.
  */
 
-import { http, createConfig } from 'wagmi'
+import { http, fallback, createConfig } from 'wagmi'
 import { mainnet } from 'wagmi/chains'
 import { injected } from 'wagmi/connectors'
 import { CHAIN } from './lib/env'
 import { registerChain } from './tracing'
 
-// Pre-register the active chain's RPC URL for trace labeling
-const rpcUrl = CHAIN.rpcUrls.default.http[0]
-registerChain(CHAIN.id, rpcUrl)
+// Pre-register the primary RPC URL for trace labeling
+const primaryRpc = CHAIN.rpcUrls.default.http[0]
+registerChain(CHAIN.id, primaryRpc)
 
-// Batched transport: groups concurrent eth_call requests into a single JSON-RPC
-// batch, reducing round-trips to the public RPC endpoint.
-const batchedTransport = http(rpcUrl, {
-  batch: { wait: 30 },
-  retryCount: 4,
-  retryDelay: 800,
-})
+// Fallback transport: tries each official RPC endpoint in order.
+// Each leg uses a 30 ms batch window and a single retry (500 ms) so a
+// 429 from one endpoint automatically rolls over to the next.
+const chainTransport = fallback(
+  CHAIN.rpcUrls.default.http.map((u) =>
+    http(u, { batch: { wait: 30 }, retryCount: 1, retryDelay: 500 })
+  )
+)
 
 export const config = createConfig({
   chains: [CHAIN, mainnet], // mainnet stays for ENS resolution
   connectors: [injected()],
   transports: {
-    [CHAIN.id]: batchedTransport,
+    [CHAIN.id]: chainTransport,
     [mainnet.id]: http(), // ENS only — no batching needed
   },
 })
