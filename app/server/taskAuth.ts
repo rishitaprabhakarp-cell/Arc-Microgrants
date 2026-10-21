@@ -98,6 +98,10 @@ export async function verifyTaskAuth(
     return { ok: false, status: 400, reason: "task must be 1–2000 characters" };
   }
 
+  if (typeof body.urgent !== "boolean") {
+    return { ok: false, status: 400, reason: "urgent must be a boolean" };
+  }
+
   if (!body.issuedAt || typeof body.issuedAt !== "string") {
     return { ok: false, status: 400, reason: "issuedAt is required" };
   }

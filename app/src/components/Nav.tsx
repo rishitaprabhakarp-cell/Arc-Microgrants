@@ -1,77 +1,37 @@
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ConnectKitButton } from 'connectkit'
+import { useAccount } from 'wagmi'
 import { Menu, X } from 'lucide-react'
 import { CHAIN } from '../lib/env'
-import { computeActiveSection } from '../lib/activeSection'
 
-const NAV_LINKS = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'budgets', label: 'Budgets' },
-  { id: 'run', label: 'Run a task' },
-  { id: 'activity', label: 'Activity' },
-]
-
-/** Smooth-scroll to a section by id */
-function smoothScroll(id: string) {
-  const el = document.getElementById(id)
-  if (!el) return
-  const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  el.scrollIntoView({ behavior: prefersReduced ? 'instant' : 'smooth' })
-}
-
-/** Read current viewport-relative section tops and delegate to the pure function. */
-function getActiveSection(navHeight: number): string {
-  const threshold = navHeight + window.innerHeight * 0.3
-  const atBottom =
-    window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4
-
-  const sections = NAV_LINKS.map((link) => {
-    const el = document.getElementById(link.id)
-    // If the element doesn't exist yet, place it far below so it doesn't qualify
-    const top = el ? el.getBoundingClientRect().top : Infinity
-    return { id: link.id, top }
-  })
-
-  return computeActiveSection(sections, threshold, atBottom)
-}
+const NAV_HEIGHT = 56
 
 interface Props {
-  activeSection: string
-  onActiveSection: (id: string) => void
+  /** If true, the nav scrolled-in shadow is always shown (route pages vs. landing scroll) */
+  alwaysScrolled?: boolean
 }
 
-export function Nav({ activeSection, onActiveSection }: Props) {
+export function Nav({ alwaysScrolled = false }: Props) {
   const [scrolled, setScrolled] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const { isConnected } = useAccount()
+  const location = useLocation()
+  const navigate = useNavigate()
   const networkName = CHAIN.name
   const isTestnet = CHAIN.testnet === true
 
-  // Scroll listener: update scrolled + active section, throttled with rAF
+  /* oxlint-disable react/set-state-in-effect */
   useEffect(() => {
-    const NAV_HEIGHT = 56
-    let rafId: number | null = null
-
-    const onScroll = () => {
-      if (rafId !== null) return
-      rafId = requestAnimationFrame(() => {
-        rafId = null
-        setScrolled(window.scrollY > 8)
-        onActiveSection(getActiveSection(NAV_HEIGHT))
-      })
-    }
-
-    // Run once on mount to set initial state
-    onActiveSection(getActiveSection(NAV_HEIGHT))
-
+    if (alwaysScrolled) { setScrolled(true); return }
+    const onScroll = () => setScrolled(window.scrollY > 8)
+    onScroll()
     window.addEventListener('scroll', onScroll, { passive: true })
-    return () => {
-      window.removeEventListener('scroll', onScroll)
-      if (rafId !== null) cancelAnimationFrame(rafId)
-    }
-  }, [onActiveSection])
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [alwaysScrolled])
+  /* oxlint-enable react/set-state-in-effect */
 
-  // Close mobile menu on Escape
   useEffect(() => {
     if (!mobileOpen) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMobileOpen(false) }
@@ -79,58 +39,64 @@ export function Nav({ activeSection, onActiveSection }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [mobileOpen])
 
+  // Close mobile menu on route change
+  // oxlint-disable-next-line react/set-state-in-effect
+  useEffect(() => { setMobileOpen(false) }, [location.pathname])
+
+  const isActive = (path: string) =>
+    path === '/' ? location.pathname === '/' : location.pathname.startsWith(path)
+
+  const navLinks = [
+    { path: '/', label: 'Home' },
+    ...(isConnected ? [{ path: '/vaults', label: 'My vaults' }] : []),
+  ]
+
   return (
     <>
       <header
         id="nav"
         className="fixed inset-x-0 top-0 z-50 transition-shadow"
         style={{
+          height: NAV_HEIGHT,
           background: 'rgba(255,255,255,0.88)',
           backdropFilter: 'blur(16px)',
           WebkitBackdropFilter: 'blur(16px)',
           borderBottom: scrolled ? '1px solid var(--hash)' : '1px solid transparent',
         }}
       >
-        <div
-          className="content-wrap flex h-14 items-center justify-between gap-4"
-          style={{ maxWidth: 1216 }}
-        >
+        <div className="content-wrap flex h-14 items-center justify-between gap-4" style={{ maxWidth: 1216 }}>
           {/* Wordmark */}
-          <div className="flex flex-col leading-none select-none">
-            <span
-              className="display text-sm font-semibold"
-              style={{ color: 'var(--navy)', letterSpacing: '-0.02em' }}
-            >
+          <button
+            className="flex flex-col leading-none select-none"
+            onClick={() => void navigate('/')}
+            style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+          >
+            <span className="display text-sm font-semibold" style={{ color: 'var(--navy)', letterSpacing: '-0.02em' }}>
               Agent Paymaster
             </span>
-            <span
-              className="mono text-[10px] uppercase"
-              style={{ color: 'var(--details)', letterSpacing: '0.14em' }}
-            >
+            <span className="mono text-[10px] uppercase" style={{ color: 'var(--details)', letterSpacing: '0.14em' }}>
               Built on Arc
             </span>
-          </div>
+          </button>
 
           {/* Center links — desktop */}
           <nav className="hidden items-center gap-1 md:flex" aria-label="Main navigation">
-            {NAV_LINKS.map((link) => {
-              const isActive = activeSection === link.id
+            {navLinks.map((link) => {
+              const active = isActive(link.path)
               return (
-                <button
-                  key={link.id}
-                  onClick={() => smoothScroll(link.id)}
+                <Link
+                  key={link.path}
+                  to={link.path}
                   className="relative px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                   style={{
-                    color: isActive ? 'var(--navy)' : 'var(--details)',
+                    color: active ? 'var(--navy)' : 'var(--details)',
                     outlineColor: '#2F578C',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
+                    textDecoration: 'none',
                   }}
-                  aria-current={isActive ? 'page' : undefined}
+                  aria-current={active ? 'page' : undefined}
                 >
                   {link.label}
-                  {isActive && (
+                  {active && (
                     <motion.span
                       layoutId="nav-underline"
                       className="absolute inset-x-3 bottom-0 h-px"
@@ -138,7 +104,7 @@ export function Nav({ activeSection, onActiveSection }: Props) {
                       transition={{ type: 'spring', stiffness: 400, damping: 40 }}
                     />
                   )}
-                </button>
+                </Link>
               )
             })}
           </nav>
@@ -158,13 +124,13 @@ export function Nav({ activeSection, onActiveSection }: Props) {
             </span>
 
             <ConnectKitButton.Custom>
-              {({ isConnected, show, address, truncatedAddress }) => (
+              {({ isConnected: ck, show, address, truncatedAddress }) => (
                 <button
                   onClick={show}
                   className="btn btn-secondary btn-sm"
                   style={{ fontFamily: "'DM Sans', sans-serif" }}
                 >
-                  {isConnected ? (truncatedAddress ?? address?.slice(0, 8)) : 'Connect wallet'}
+                  {ck ? (truncatedAddress ?? address?.slice(0, 8)) : 'Connect wallet'}
                 </button>
               )}
             </ConnectKitButton.Custom>
@@ -174,13 +140,7 @@ export function Nav({ activeSection, onActiveSection }: Props) {
               onClick={() => setMobileOpen((o) => !o)}
               aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
               aria-expanded={mobileOpen}
-              style={{
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'var(--ink)',
-                outlineColor: '#2F578C',
-              }}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ink)', outlineColor: '#2F578C' }}
             >
               {mobileOpen ? <X className="size-5" /> : <Menu className="size-5" />}
             </button>
@@ -188,7 +148,7 @@ export function Nav({ activeSection, onActiveSection }: Props) {
         </div>
       </header>
 
-      {/* Mobile menu sheet */}
+      {/* Mobile sheet */}
       <AnimatePresence>
         {mobileOpen && (
           <motion.div
@@ -201,22 +161,21 @@ export function Nav({ activeSection, onActiveSection }: Props) {
             style={{ background: 'rgba(255,255,255,0.97)', borderBottom: '1px solid var(--hash)' }}
           >
             <nav className="flex flex-col py-2">
-              {NAV_LINKS.map((link) => (
-                <button
-                  key={link.id}
-                  onClick={() => { smoothScroll(link.id); setMobileOpen(false) }}
+              {navLinks.map((link) => (
+                <Link
+                  key={link.path}
+                  to={link.path}
                   className="px-6 py-3 text-left text-base font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                   style={{
-                    color: activeSection === link.id ? 'var(--navy)' : 'var(--details)',
-                    background: activeSection === link.id ? 'rgba(27,49,88,0.05)' : 'none',
-                    border: 'none',
-                    cursor: 'pointer',
+                    color: isActive(link.path) ? 'var(--navy)' : 'var(--details)',
+                    background: isActive(link.path) ? 'rgba(27,49,88,0.05)' : 'none',
+                    textDecoration: 'none',
                     outlineColor: '#2F578C',
                   }}
-                  aria-current={activeSection === link.id ? 'page' : undefined}
+                  aria-current={isActive(link.path) ? 'page' : undefined}
                 >
                   {link.label}
-                </button>
+                </Link>
               ))}
             </nav>
           </motion.div>

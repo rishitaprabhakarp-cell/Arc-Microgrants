@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPublicClient, http, decodeEventLog } from 'viem'
 import { ExternalLink } from 'lucide-react'
 import { AGENT_VAULT_ABI } from '../../server/abi'
-import { CHAIN, VAULT_ADDRESS, VAULT_DEPLOY_BLOCK, EXPLORER_BASE } from '../lib/env'
+import { CHAIN, EXPLORER_BASE } from '../lib/env'
 import { formatUsdc } from '../lib/usdc'
 import { scanAllLogs } from '../lib/scanLogs'
 import { fetchExplorerLogs } from '../lib/explorerLogs'
@@ -63,6 +63,10 @@ interface ActivityApiResponse {
 // ---------------------------------------------------------------------------
 
 interface Props {
+  /** Address of the vault to query */
+  vaultAddress: `0x${string}`
+  /** Block to start scanning from (optional) */
+  deployBlock?: bigint
   sessionRejections: RejectionEntry[]
   /** Increment to force an immediate refresh (e.g. after a task completes) */
   refreshTick?: number
@@ -151,7 +155,7 @@ function decodePaidEntryFromRpc(log: unknown): PaidEntry | null {
 // ---------------------------------------------------------------------------
 
 /* oxlint-disable react/set-state-in-effect */
-export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: Props) {
+export function ActivityFeed({ vaultAddress, deployBlock, sessionRejections, refreshTick, latestPayment }: Props) {
   const [paidEvents, setPaidEvents] = useState<PaidEntry[]>([])
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState<{ pct: number } | null>(null)
@@ -215,8 +219,8 @@ export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: 
       try {
         const entries = await fetchExplorerLogs(
           EXPLORER_BASE,
-          VAULT_ADDRESS,
-          VAULT_DEPLOY_BLOCK,
+          vaultAddress,
+          deployBlock ?? 0n,
           { fetch: (url) => fetch(url) },
         )
         if (!ctrl.signal.aborted && mountedRef.current) {
@@ -250,7 +254,7 @@ export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: 
         {
           getLogs: async (range) => {
             return client.getLogs({
-              address: VAULT_ADDRESS,
+              address: vaultAddress,
               event: {
                 type: 'event',
                 name: 'Paid',
@@ -298,7 +302,7 @@ export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: 
         setScanning(false)
       }
     }
-  }, [])
+  }, [vaultAddress, deployBlock])
 
   // ── Initial load + 30 s interval (tab-visible only) ───────────────────────
   useEffect(() => {

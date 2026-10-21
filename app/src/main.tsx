@@ -15,6 +15,7 @@ import './console-capture'
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
 import { WagmiProvider } from 'wagmi'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ConnectKitProvider } from 'connectkit'
@@ -32,7 +33,6 @@ const StudioLogo = () => (
   </svg>
 )
 
-// Studio watermark component - links back to Studio
 const StudioWatermark = () => (
   <a
     href="https://studio.arc.io/"
@@ -68,15 +68,16 @@ const StudioWatermark = () => (
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <ConnectKitProvider>
-          <App />
-          <StudioWatermark />
-          <Toaster position="top-center" />
-        </ConnectKitProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+    <BrowserRouter>
+      <WagmiProvider config={config}>
+        <QueryClientProvider client={queryClient}>
+          <ConnectKitProvider>
+            <App />
+            <StudioWatermark />
+            <Toaster position="top-center" />
+          </ConnectKitProvider>
+        </QueryClientProvider>
+      </WagmiProvider>
+    </BrowserRouter>
   </StrictMode>,
 )
-

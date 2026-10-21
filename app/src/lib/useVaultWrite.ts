@@ -53,7 +53,7 @@ export function useVaultWrite() {
       TFn extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
     >(
       req: VaultWriteRequest<TAbi, TFn>,
-    ) => {
+    ): Promise<{ receipt: import('viem').TransactionReceipt } | undefined> => {
       if (isBusy) return
       setIsBusy(true)
       setStage('idle')
@@ -108,6 +108,7 @@ export function useVaultWrite() {
 
           // Invalidate all wagmi queries so every read refreshes immediately
           await queryClient.invalidateQueries()
+          return { receipt }
         } else {
           setStage('error')
           toast.error(`${req.action} failed onchain`, { id: toastId })
