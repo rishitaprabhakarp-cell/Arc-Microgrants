@@ -15,7 +15,7 @@ Each user creates their own AgentVault through the factory. Deploy with `deploy/
 
 | Network | Address | Deploy tx | Block |
 | --- | --- | --- | --- |
-| Arc testnet | pending | — | — |
+| Arc testnet | [0xe7b4A3a4c1E73Bc4Dce59AEc2e4e4ff59853aEc9](https://explorer.testnet.arc.io/address/0xe7b4A3a4c1E73Bc4Dce59AEc2e4e4ff59853aEc9) | [0xf6076ebf…5bac78](https://explorer.testnet.arc.io/tx/0xf6076ebfee784438f2a3d97eeec00839361112b454c893f1896cecd66d5bac78) | 68329814 |
 | Arc mainnet | pending | — | — |
 
 ## AgentVault (single-owner, superseded by the factory)
@@ -31,7 +31,7 @@ Each user creates their own AgentVault through the factory. Deploy with `deploy/
 | --- | --- |
 | Research agent | 0xdb86713e416875A84C3CE118E7d630826a92ED39 |
 | Specialist agent | 0x7D8f2588D3f8aE2640A2AFA7A21824630DF49Bb2 |
-| Writer agent | pending |
+| Writer agent | 0x448CE0CfC6EEC6d686fE3bf493d87b20BfA36373 |
 
 ## Verification
 
