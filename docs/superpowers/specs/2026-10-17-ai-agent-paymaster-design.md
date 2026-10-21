@@ -165,7 +165,35 @@ reputation scoring, ERC-8183 job escrow, cross-chain funding. These go in the
 | Video | Studio build, tests, mainnet deploy, task → payment → rejection |
 | Builder profile | Your GitHub / X / Farcaster |
 
-## 11. Schedule
+## 11. Multi-user platform (added 2026-10-19)
+
+The single owner vault became a platform: anyone can create a vault and give our
+hosted agents budgets.
+
+- `VaultFactory(usdc)`: `createVault()` deploys `new AgentVault(usdc, msg.sender)`,
+  records `isVault[vault]`, and emits `VaultCreated(owner, vault)`.
+  `vaultsOfOwner(owner)` and `vaultCount` are views. The factory has no owner and holds no funds.
+- Hosted agents: Research (`RESEARCH_AGENT_PRIVATE_KEY`) and Writer
+  (`WRITER_AGENT_PRIVATE_KEY`, optional). Their catalog is served from `GET /api/agents`.
+  Each vault owner sets caps and payees for whichever hosted agents they want.
+- `POST /api/task { vault, agentId, task, urgent, issuedAt, signature }`. The owner
+  signs an EIP-191 message (`vault`, `agent`, `urgent`, `task-sha256`, `issued-at`).
+  The server checks `factory.isVault`, recovers the signer against `vault.owner()`,
+  rejects messages more than 5 minutes old, and preflights `paused`, agent active,
+  payee allowed, vault balance, and `remainingToday` before calling Claude.
+- The specialist accepts a `Paid` log only if the log's emitting address passes `factory.isVault`.
+- Frontend routes: `/` (landing page, works without a wallet), `/vaults` (requires a
+  wallet; redirects home when the wallet disconnects), and `/vault/:address`
+  (read-only for everyone, write controls only for the owner, re-checked when the account switches).
+
+Replay protection, corrected: `jobPaid` does not stop a signed task from being
+re-submitted. Claude writes the specialist request, so each run produces a new
+`jobId`. Replays are bounded by the 5-minute `issued-at` expiry and by the
+vault's per-payment and daily caps. Known gap: the specialist does not record
+spent `txHash` values, so a paid receipt can be presented again for another
+answer (costs model tokens, not USDC).
+
+## 12. Schedule
 
 | Dates | Work |
 | --- | --- |

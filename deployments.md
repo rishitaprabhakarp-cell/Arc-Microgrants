@@ -9,7 +9,16 @@
 
 - https://arc-microgrants-tan.vercel.app (Vercel, deployed from GitHub `main`, root directory `app`)
 
-## AgentVault
+## VaultFactory (current)
+
+Each user creates their own AgentVault through the factory. Deploy with `deploy/deploy-factory-testnet.sh` (or `deploy-factory-mainnet.sh`).
+
+| Network | Address | Deploy tx | Block |
+| --- | --- | --- | --- |
+| Arc testnet | pending | — | — |
+| Arc mainnet | pending | — | — |
+
+## AgentVault (single-owner, superseded by the factory)
 
 | Network | Address | Deploy tx | Owner | Notes |
 | --- | --- | --- | --- | --- |
@@ -22,9 +31,12 @@
 | --- | --- |
 | Research agent | 0xdb86713e416875A84C3CE118E7d630826a92ED39 |
 | Specialist agent | 0x7D8f2588D3f8aE2640A2AFA7A21824630DF49Bb2 |
+| Writer agent | pending |
 
 ## Verification
 
 - Arc Studio (max preset): 18/18 Foundry tests pass; solidity-auditor and functional-auditor clean after one fix (per-agent `jobPaid`); Slither: 2 Low `timestamp` findings on the intended 24h window check.
 - Local (arc-forge 1.7.1-dev, Arc Foundry v0.8.0-2): 18/18 pass.
+- VaultFactory: 10 Foundry tests (28 total pass locally). Mutation check: removing `isVault[vault] = true` fails `test_isVaultTrueForCreatedFalseForRandom`.
+- App: 132 vitest tests across 17 files, including byte-for-byte parity between the browser and server task-message builders.
 - Mutation check: changing the window boundary `>=` to `>` fails `test_windowResetsAtExactBoundary`; changing the per-tx cap `>` to `>=` fails `test_payEqualToCaps`.
