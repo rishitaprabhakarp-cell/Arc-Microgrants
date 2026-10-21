@@ -8,9 +8,9 @@ import type {
 import type Anthropic from "@anthropic-ai/sdk";
 import { computeJobId } from "./jobId.js";
 import { AGENT_VAULT_ABI } from "./abi.js";
-import type { Config } from "./config.js";
+import type { Config, HostedAgent } from "./config.js";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export type Tier = "standard" | "priority";
 
@@ -21,6 +21,8 @@ export type TaskResult =
 
 export interface ResearchDeps {
   config: Config;
+  vault: Address;
+  agent: HostedAgent;
   publicClient: PublicClient;
   walletClient: WalletClient;
   anthropic: Anthropic;
@@ -29,23 +31,45 @@ export interface ResearchDeps {
   getExplorerBase: () => string;
 }
 
-// ── Low-gas threshold: 0.01 USDC in 18-decimal native units = 10^16 wei ─────
+// ── Low-gas threshold: 0.01 USDC in 18-decimal native units = 10^16 wei ──────
 const LOW_GAS_THRESHOLD = 10n ** 16n;
 
-// ── Main entry point ─────────────────────────────────────────────────────────
+// ── Nonce error detection ─────────────────────────────────────────────────────
+function isNonceError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes("nonce too low") || msg.includes("replacement transaction underpriced");
+}
+
+// ── Per-agent system prompts ──────────────────────────────────────────────────
+function systemPrompt(agentId: string): string {
+  if (agentId === "writer") {
+    return (
+      "You are a writer agent with a USDC budget. " +
+      "When the user's task needs a translation, condensed version, or specialist review, hire the specialist tool. " +
+      "Choose the priority tier only when the user explicitly says the task is urgent. " +
+      "Otherwise use the standard tier."
+    );
+  }
+  // default: research
+  return (
+    "You are a research agent with a USDC budget. " +
+    "When the user's task needs a summary or translation, hire the specialist tool. " +
+    "Choose the priority tier only when the user explicitly says the task is urgent. " +
+    "Otherwise use the standard tier."
+  );
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function runTask(task: string, deps: ResearchDeps): Promise<TaskResult> {
-  const { config, publicClient, walletClient, anthropic, fetch, randomBytes32, getExplorerBase } = deps;
+  const { config, vault, agent, publicClient, walletClient, anthropic, fetch, randomBytes32, getExplorerBase } = deps;
 
-  // ── 1. Ask Claude to decide tier and form the specialist request ────────
+  // ── 1. Ask Claude to decide tier and form the specialist request ──────────
   const message = await anthropic.messages.create({
     model: config.anthropicModel,
     max_tokens: 256,
-    system:
-      "You are a research agent with a USDC budget. " +
-      "When the user's task needs a summary or translation, hire the specialist tool. " +
-      "Choose the priority tier only when the user explicitly says the task is urgent. " +
-      "Otherwise use the standard tier.",
+    system: systemPrompt(agent.id),
     messages: [{ role: "user", content: task }],
     tools: [
       {
@@ -70,13 +94,12 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
     ],
   });
 
-  // ── 2. Find the hire_specialist tool call ───────────────────────────────
+  // ── 2. Find the hire_specialist tool call ─────────────────────────────────
   const toolUse = message.content.find(
     (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "hire_specialist",
   );
 
   if (!toolUse) {
-    // Claude answered directly without hiring — return its text
     const text = message.content
       .filter((c): c is Anthropic.TextBlock => c.type === "text")
       .map((c) => c.text)
@@ -86,7 +109,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
 
   const input = toolUse.input as { request?: unknown; tier?: unknown };
 
-  // ── 3. Validate the tool input ─────────────────────────────────────────
+  // ── 3. Validate the tool input ────────────────────────────────────────────
   const tier = input.tier;
   if (tier !== "standard" && tier !== "priority") {
     return { ok: false, kind: "error", message: `Invalid tier from model: ${String(tier)}` };
@@ -100,34 +123,31 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
     return { ok: false, kind: "error", message: "Specialist request exceeds 2000 characters" };
   }
 
-  // Amount comes from config, never from the model
   const amount = tier === "priority" ? config.pricePriority : config.priceStandard;
   const amountUsdc = formatUnits(amount, 6);
 
-  // ── 4. Gas check ───────────────────────────────────────────────────────
+  // ── 4. Gas check ──────────────────────────────────────────────────────────
   const agentAddress = walletClient.account?.address as Address;
   const nativeBal = await publicClient.getBalance({ address: agentAddress });
   if (nativeBal < LOW_GAS_THRESHOLD) {
-    return { ok: false, kind: "error", message: "Research agent wallet needs gas USDC" };
+    return { ok: false, kind: "error", message: `${agent.name} needs gas USDC` };
   }
 
-  // ── 5. Compute nonce + jobId ────────────────────────────────────────────
+  // ── 5. Compute nonce + jobId ──────────────────────────────────────────────
   const nonce = randomBytes32();
   const jobId = computeJobId(request, nonce);
   const memo = `tier:${tier}`;
 
-  // ── 6. Simulate first — catch contract custom errors ────────────────────
+  // ── 6. Simulate first — catch contract custom errors ──────────────────────
   try {
     await publicClient.simulateContract({
-      address: config.vaultAddress,
+      address: vault,
       abi: AGENT_VAULT_ABI,
       functionName: "pay",
       args: [config.specialistAddress, amount, jobId, memo],
       account: agentAddress,
     });
   } catch (err: unknown) {
-    // If this is a viem BaseError, walk the chain for a ContractFunctionRevertedError.
-    // That carries the decoded errorName from the contract's custom error.
     if (err instanceof BaseError) {
       const revertErr = err.walk(
         (e) => e instanceof ContractFunctionRevertedError,
@@ -137,28 +157,44 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
         return { ok: false, kind: "rejected", reason: revertData.errorName, tier, amountUsdc };
       }
     }
-    // Any other failure (RPC down, timeout, unknown) → error, not rejected
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, kind: "error", message: `Simulate failed: ${message}` };
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, kind: "error", message: `Simulate failed: ${msg}` };
   }
 
-  // ── 7. Send the transaction ─────────────────────────────────────────────
-  const txHash = await walletClient.writeContract({
-    address: config.vaultAddress,
-    abi: AGENT_VAULT_ABI,
-    functionName: "pay",
-    args: [config.specialistAddress, amount, jobId, memo],
-    chain: null,
-    account: walletClient.account!,
-  });
+  // ── 7. Send the transaction (retry once on nonce error) ───────────────────
+  let txHash: Hex;
+  try {
+    txHash = await walletClient.writeContract({
+      address: vault,
+      abi: AGENT_VAULT_ABI,
+      functionName: "pay",
+      args: [config.specialistAddress, amount, jobId, memo],
+      chain: null,
+      account: walletClient.account!,
+    });
+  } catch (err: unknown) {
+    if (isNonceError(err)) {
+      // Retry once
+      txHash = await walletClient.writeContract({
+        address: vault,
+        abi: AGENT_VAULT_ABI,
+        functionName: "pay",
+        args: [config.specialistAddress, amount, jobId, memo],
+        chain: null,
+        account: walletClient.account!,
+      });
+    } else {
+      throw err;
+    }
+  }
 
-  // ── 8. Confirm the receipt — reverted tx must not reach the specialist ──
+  // ── 8. Confirm the receipt ────────────────────────────────────────────────
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") {
     return { ok: false, kind: "error", message: `Payment transaction reverted: ${txHash}` };
   }
 
-  // ── 9. Call the specialist API ──────────────────────────────────────────
+  // ── 9. Call the specialist API ────────────────────────────────────────────
   const specResp = await fetch(`${config.publicBaseUrl}/api/specialist`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -170,20 +206,16 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
     const body = (await specResp.json()) as { result?: string };
     result = body.result ?? "(empty)";
   } else {
-    // Payment happened; specialist declined — surface the reason but keep ok: true
     let reason = `HTTP ${specResp.status}`;
     try {
       const errBody = (await specResp.json()) as { reason?: string; error?: string };
       reason = errBody.reason ?? errBody.error ?? reason;
     } catch {
-      // ignore — keep the HTTP status string
+      // keep HTTP status string
     }
     result = `Specialist did not deliver: ${reason}`;
   }
 
   const explorerUrl = `${getExplorerBase()}/tx/${txHash}`;
-
   return { ok: true, tier, amountUsdc, txHash, explorerUrl, result };
 }
-
-

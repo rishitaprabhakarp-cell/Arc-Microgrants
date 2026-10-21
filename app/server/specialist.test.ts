@@ -3,38 +3,45 @@ import { parseUnits, encodeAbiParameters, parseAbiParameters, keccak256 } from "
 import type { Address, Hex, Log } from "viem";
 import { serveJob, type ServeJobBody, type SpecialistDeps } from "./specialist.js";
 import { computeJobId } from "./jobId.js";
-import type { Config } from "./config.js";
+import type { Config, HostedAgent } from "./config.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const VAULT      = "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa" as Address;
+const FACTORY    = "0xfAfAfAfAfAfAfAfAfAfAfAfAfAfAfAfAfAfAfAfA" as Address;
 const AGENT_ADDR = "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB" as Address;
 const SPECIALIST = "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC" as Address;
 const TX_HASH    = ("0x" + "ab".repeat(32)) as Hex;
 const NONCE      = ("0x" + "cc".repeat(32)) as Hex;
 const REQUEST    = "Please summarise this quarterly report.";
 
+const RESEARCH_AGENT: HostedAgent = {
+  id: "research",
+  name: "Research agent",
+  description: "test",
+  privateKey: ("0x" + "01".repeat(32)) as Hex,
+};
+
 const BASE_CONFIG: Config = {
   chain: "arcTestnet",
   rpcUrl: "https://rpc.testnet.arc.io",
-  vaultAddress: VAULT,
-  researchAgentPrivateKey: ("0x" + "01".repeat(32)) as Hex,
+  factoryAddress: FACTORY,
+  factoryDeployBlock: 0n,
+  hostedAgents: [RESEARCH_AGENT],
   specialistAddress: SPECIALIST,
   priceStandard: parseUnits("0.05", 6),
   pricePriority: parseUnits("0.20", 6),
   anthropicApiKey: "sk-test",
   anthropicModel: "claude-haiku-4-5",
   publicBaseUrl: "https://example.com",
-  vaultDeployBlock: 0n,
   blockscoutApiKey: undefined,
 };
 
-const OTHER_VAULT  = "0xDDdDddDdDdddDDddDDddDDDDdDdDDdDDdDDDDDDd" as Address;
-const WRONG_PAYEE  = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as Address;
+const NON_FACTORY_VAULT = "0xDDdDddDdDdddDDddDDddDDDDdDdDDdDDdDDDDDDd" as Address;
+const WRONG_PAYEE       = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as Address;
 
 // ── Log builder ───────────────────────────────────────────────────────────────
-// Build a synthetic Paid event log that matches the ABI.
-// Paid(address indexed agent, address indexed payee, uint256 amount, bytes32 indexed jobId, string memo)
+
 function buildPaidLog({
   vaultAddress = VAULT,
   agent = AGENT_ADDR,
@@ -50,11 +57,9 @@ function buildPaidLog({
   jobId?: Hex;
   memo?: string;
 }): Log {
-  // topics[0] = Paid event signature
   const eventSig = keccak256(
     new TextEncoder().encode("Paid(address,address,uint256,bytes32,string)"),
   ) as Hex;
-  // indexed: agent, payee, jobId → topics[1,2,3]
   const padAddr = (a: string) => ("0x" + a.replace(/^0x/, "").padStart(64, "0")) as Hex;
   const topics: [Hex, Hex, Hex, Hex] = [
     eventSig,
@@ -62,13 +67,10 @@ function buildPaidLog({
     padAddr(payee),
     jobId,
   ];
-
-  // non-indexed: amount (uint256), memo (string) — ABI-encode them
   const data = encodeAbiParameters(parseAbiParameters("uint256 amount, string memo"), [
     amount,
     memo,
   ]) as Hex;
-
   return {
     address: vaultAddress,
     topics,
@@ -96,7 +98,12 @@ function makeAnthropicResult(text: string) {
 
 // ── Deps builder ──────────────────────────────────────────────────────────────
 
-function makeDeps(overrides: { log?: Log | null; configOverride?: Partial<Config> } = {}): SpecialistDeps {
+function makeDeps(overrides: {
+  log?: Log | null;
+  configOverride?: Partial<Config>;
+  /** isVault return value for a given address — defaults to true for VAULT, false for others */
+  isVaultMap?: Record<string, boolean>;
+} = {}): SpecialistDeps {
   const log =
     overrides.log !== undefined
       ? overrides.log
@@ -104,8 +111,18 @@ function makeDeps(overrides: { log?: Log | null; configOverride?: Partial<Config
 
   const receipt = log ? { logs: [log] } : { logs: [] };
 
+  // Default: VAULT is registered with factory, NON_FACTORY_VAULT is not
+  const isVaultMap = overrides.isVaultMap ?? {
+    [VAULT.toLowerCase()]: true,
+    [NON_FACTORY_VAULT.toLowerCase()]: false,
+  };
+
   const publicClient = {
     getTransactionReceipt: vi.fn().mockResolvedValue(receipt),
+    readContract: vi.fn().mockImplementation(({ args }: { args: [`0x${string}`] }) => {
+      const addr = (args[0] as string).toLowerCase();
+      return Promise.resolve(isVaultMap[addr] ?? false);
+    }),
   };
 
   return {
@@ -143,15 +160,28 @@ describe("serveJob (specialist agent)", () => {
     expect(result.reason).toMatch(/no paid log/i);
   });
 
-  it("refuses log from a different vault", async () => {
-    const log = buildPaidLog({ vaultAddress: OTHER_VAULT });
+  it("refuses Paid log from an address not registered in the factory", async () => {
+    // Log comes from a vault address that the factory says is not registered
+    const log = buildPaidLog({ vaultAddress: NON_FACTORY_VAULT });
     const deps = makeDeps({ log });
     const result = await serveJob(VALID_BODY, deps);
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
-    // The log address doesn't match vault, so it won't be found as a Paid log
+    // The log's address fails the isVault check — treated as no valid Paid log
     expect(result.reason).toMatch(/no paid log/i);
+  });
+
+  it("accepts Paid log from any factory-registered vault (not just config.vaultAddress)", async () => {
+    const SECOND_VAULT = "0xEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEe" as Address;
+    const log = buildPaidLog({ vaultAddress: SECOND_VAULT });
+    const isVaultMap = {
+      [SECOND_VAULT.toLowerCase()]: true,
+    };
+    const deps = makeDeps({ log, isVaultMap });
+    const result = await serveJob(VALID_BODY, deps);
+
+    expect(result.ok).toBe(true);
   });
 
   it("refuses wrong payee", async () => {
@@ -165,7 +195,6 @@ describe("serveJob (specialist agent)", () => {
   });
 
   it("refuses jobId for a different request", async () => {
-    // Log was paid for a different request string
     const differentRequest = "completely different request text";
     const log = buildPaidLog({ jobId: computeJobId(differentRequest, NONCE) });
     const deps = makeDeps({ log });
@@ -177,8 +206,7 @@ describe("serveJob (specialist agent)", () => {
   });
 
   it("refuses underpayment for priority tier", async () => {
-    // Log contains standard price but body requests priority
-    const log = buildPaidLog({ amount: parseUnits("0.05", 6) }); // standard, not priority
+    const log = buildPaidLog({ amount: parseUnits("0.05", 6) });
     const deps = makeDeps({ log });
     const result = await serveJob(
       { ...VALID_BODY, tier: "priority" },
@@ -189,8 +217,6 @@ describe("serveJob (specialist agent)", () => {
     if (result.ok) throw new Error("expected not ok");
     expect(result.reason).toMatch(/underpayment/i);
   });
-
-  // ── Defect 5: specialist must use configured model ─────────────────────────
 
   it("specialist uses configured model", async () => {
     const capturedCalls: unknown[] = [];

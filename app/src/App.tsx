@@ -107,8 +107,8 @@ export default function App() {
     if (result.ok && result.txHash) {
       setLatestPayment({
         txHash: result.txHash,
-        agent: import.meta.env.VITE_RESEARCH_AGENT_ADDRESS ?? '',
-        payee: import.meta.env.VITE_SPECIALIST_ADDRESS ?? '',
+        agent: (import.meta.env.VITE_RESEARCH_AGENT_ADDRESS as string | undefined) ?? '',
+        payee: (import.meta.env.VITE_SPECIALIST_ADDRESS as string | undefined) ?? '',
         amountUsdc: result.amountUsdc ?? '0',
         memo: `tier:${result.tier ?? ''}`,
       })

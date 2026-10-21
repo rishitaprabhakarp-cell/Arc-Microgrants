@@ -6,18 +6,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import { randomBytes } from "crypto";
 import { loadConfig } from "../server/config.js";
 import { makeTransport } from "../server/transport.js";
+import { verifyTaskAuth } from "../server/taskAuth.js";
 import { runTask } from "../server/research.js";
+import type { TaskRequestBody } from "../server/taskAuth.js";
 import type { Hex } from "viem";
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
-
-  const body = req.body as { task?: unknown };
-  if (!body?.task || typeof body.task !== "string") {
-    res.status(400).json({ error: "Missing or invalid task field" });
     return;
   }
 
@@ -31,15 +27,87 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   const chain = config.chain === "arc" ? arc : arcTestnet;
-  const account = privateKeyToAccount(config.researchAgentPrivateKey);
   const transport = makeTransport(config);
-
   const publicClient = createPublicClient({ chain, transport });
-  const walletClient = createWalletClient({ account, chain, transport });
   const anthropic = new Anthropic({ apiKey: config.anthropicApiKey });
 
-  const result = await runTask(body.task, {
+  // ── Validate & authenticate the request ────────────────────────────────────
+  const body = req.body as TaskRequestBody;
+  const authResult = await verifyTaskAuth(body, config, publicClient);
+  if (!authResult.ok) {
+    res.status(authResult.status).json({ error: authResult.reason });
+    return;
+  }
+
+  const { vault, agentId } = authResult;
+  const hostedAgent = config.hostedAgents.find((a) => a.id === agentId)!;
+
+  // ── Preflight reads (before any Claude call) ────────────────────────────────
+  // Resolves all readable rejection conditions from the vault so we can return 402 early.
+  const { AGENT_VAULT_ABI } = await import("../server/abi.js");
+  const agentAccount = privateKeyToAccount(hostedAgent.privateKey);
+  const agentAddress = agentAccount.address;
+  const amount = body.urgent ? config.pricePriority : config.priceStandard;
+
+  try {
+    const [isPaused, agentData, payeeOk, vaultBalance, remainingToday, agentNativeBal] =
+      await Promise.all([
+        publicClient.readContract({ address: vault, abi: AGENT_VAULT_ABI, functionName: "paused" }),
+        publicClient.readContract({ address: vault, abi: AGENT_VAULT_ABI, functionName: "agents", args: [agentAddress] }),
+        publicClient.readContract({ address: vault, abi: AGENT_VAULT_ABI, functionName: "payeeAllowed", args: [agentAddress, config.specialistAddress] }),
+        publicClient.readContract({ address: vault, abi: AGENT_VAULT_ABI, functionName: "usdc" }).then(async (usdcAddr) =>
+          publicClient.readContract({
+            address: usdcAddr as `0x${string}`,
+            abi: [{ type: "function", name: "balanceOf", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" }] as const,
+            functionName: "balanceOf",
+            args: [vault],
+          })
+        ),
+        publicClient.readContract({ address: vault, abi: AGENT_VAULT_ABI, functionName: "remainingToday", args: [agentAddress] }),
+        publicClient.getBalance({ address: agentAddress }),
+      ]);
+
+    if (isPaused) {
+      res.status(402).json({ ok: false, kind: "rejected", reason: "Paused" });
+      return;
+    }
+    // agentData: [perTxCap, dailyCap, spentInWindow, windowStart, active]
+    const [,,,, agentActive] = agentData as [bigint, bigint, bigint, bigint, boolean];
+    if (!agentActive) {
+      res.status(402).json({ ok: false, kind: "rejected", reason: "AgentInactive" });
+      return;
+    }
+    if (!payeeOk) {
+      res.status(402).json({ ok: false, kind: "rejected", reason: "PayeeNotAllowed" });
+      return;
+    }
+    if ((vaultBalance as bigint) < amount) {
+      res.status(402).json({ ok: false, kind: "rejected", reason: "InsufficientVaultBalance" });
+      return;
+    }
+    if ((remainingToday as bigint) < amount) {
+      res.status(402).json({ ok: false, kind: "rejected", reason: "ExceedsDailyCap" });
+      return;
+    }
+    const LOW_GAS = 10n ** 16n;
+    if ((agentNativeBal as bigint) < LOW_GAS) {
+      res.status(402).json({ ok: false, kind: "error", message: `${hostedAgent.name} needs gas USDC` });
+      return;
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: `Preflight check failed: ${msg}` });
+    return;
+  }
+
+  // ── Run the task ────────────────────────────────────────────────────────────
+  const task = body.urgent ? `${body.task} This is urgent.` : body.task;
+  const walletClient = createWalletClient({ account: agentAccount, chain, transport });
+
+  const result = await runTask(task, {
     config,
+    vault,
+    agent: hostedAgent,
     publicClient,
     walletClient,
     anthropic,

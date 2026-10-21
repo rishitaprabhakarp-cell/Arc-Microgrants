@@ -274,7 +274,7 @@ export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: 
           const scanned = Number(p.scanned)
           const pct = total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : 100
           setProgress({ pct })
-          const partial = (p.logs as unknown[]).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
+          const partial = (p.logs).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
           partial.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : 1))
           setPaidEvents(partial)
         },
@@ -284,7 +284,7 @@ export function ActivityFeed({ sessionRejections, refreshTick, latestPayment }: 
       if (!ctrl.signal.aborted && mountedRef.current) {
         setProgress(null)
         setRpcRecent(true)
-        const finalEntries = (logs as unknown[]).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
+        const finalEntries = (logs).map(decodePaidEntryFromRpc).filter((e): e is PaidEntry => e !== null)
         finalEntries.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : 1))
         setPaidEvents(finalEntries)
       }

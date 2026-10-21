@@ -2,10 +2,10 @@ import { decodeEventLog, getAddress } from "viem";
 import type { PublicClient, Address, Hex, TransactionReceipt } from "viem";
 import type Anthropic from "@anthropic-ai/sdk";
 import { computeJobId } from "./jobId.js";
-import { AGENT_VAULT_ABI } from "./abi.js";
+import { AGENT_VAULT_ABI, VAULT_FACTORY_ABI } from "./abi.js";
 import type { Config } from "./config.js";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export type Tier = "standard" | "priority";
 
@@ -26,13 +26,13 @@ export interface SpecialistDeps {
   anthropic: Anthropic;
 }
 
-// ── Main entry point ─────────────────────────────────────────────────────────
+// ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function serveJob(body: ServeJobBody, deps: SpecialistDeps): Promise<ServeJobResult> {
   const { config, publicClient, anthropic } = deps;
   const { txHash, nonce, request, tier } = body;
 
-  // ── 1. Load the transaction receipt ───────────────────────────────────
+  // ── 1. Load the transaction receipt ───────────────────────────────────────
   let receipt: TransactionReceipt;
   try {
     receipt = await publicClient.getTransactionReceipt({ hash: txHash });
@@ -40,9 +40,12 @@ export async function serveJob(body: ServeJobBody, deps: SpecialistDeps): Promis
     return { ok: false, reason: "Transaction receipt not found" };
   }
 
-  // ── 2. Find and decode the Paid log from VAULT_ADDRESS ─────────────────
-  const paidLog = receipt.logs.find((log) => {
-    if (getAddress(log.address) !== getAddress(config.vaultAddress)) return false;
+  // ── 2. Find a Paid log from any vault registered with the factory ─────────
+  // Iterate receipt logs; for each Paid-shaped log check factory.isVault(log.address)
+  let paidLog: (typeof receipt.logs)[number] | undefined;
+  let decodedArgs: { agent: Address; payee: Address; amount: bigint; jobId: Hex; memo: string } | undefined;
+
+  for (const log of receipt.logs) {
     try {
       const decoded = decodeEventLog({
         abi: AGENT_VAULT_ABI,
@@ -50,55 +53,49 @@ export async function serveJob(body: ServeJobBody, deps: SpecialistDeps): Promis
         topics: log.topics,
         eventName: "Paid",
       });
-      return decoded !== undefined;
-    } catch {
-      return false;
-    }
-  });
+      if (!decoded) continue;
 
-  if (!paidLog) {
+      // Check factory.isVault for this log's emitting address
+      const vaultOk = await publicClient.readContract({
+        address: config.factoryAddress,
+        abi: VAULT_FACTORY_ABI,
+        functionName: "isVault",
+        args: [getAddress(log.address)],
+      });
+      if (!vaultOk) continue;
+
+      paidLog = log;
+      decodedArgs = decoded.args as typeof decodedArgs;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!paidLog || !decodedArgs) {
     return { ok: false, reason: "No Paid log found in transaction" };
   }
 
-  // Ensure the log came from the expected vault address
-  if (getAddress(paidLog.address) !== getAddress(config.vaultAddress)) {
-    return { ok: false, reason: "Paid log is from an unexpected vault address" };
-  }
+  const { payee, amount, jobId: logJobId } = decodedArgs;
 
-  // Decode the log fully
-  const decoded = decodeEventLog({
-    abi: AGENT_VAULT_ABI,
-    data: paidLog.data,
-    topics: paidLog.topics,
-    eventName: "Paid",
-  });
-
-  const { payee, amount, jobId: logJobId } = decoded.args as {
-    agent: Address;
-    payee: Address;
-    amount: bigint;
-    jobId: Hex;
-    memo: string;
-  };
-
-  // ── 3. Verify payee ────────────────────────────────────────────────────
+  // ── 3. Verify payee ────────────────────────────────────────────────────────
   if (getAddress(payee) !== getAddress(config.specialistAddress)) {
     return { ok: false, reason: "Paid log payee does not match specialist address" };
   }
 
-  // ── 4. Verify jobId ────────────────────────────────────────────────────
+  // ── 4. Verify jobId ────────────────────────────────────────────────────────
   const expectedJobId = computeJobId(request, nonce);
   if (logJobId.toLowerCase() !== expectedJobId.toLowerCase()) {
     return { ok: false, reason: "Job ID mismatch: computed ID does not match the log" };
   }
 
-  // ── 5. Verify amount ≥ configured price for tier ──────────────────────
+  // ── 5. Verify amount ≥ configured price for tier ──────────────────────────
   const minPrice = tier === "priority" ? config.pricePriority : config.priceStandard;
   if (amount < minPrice) {
     return { ok: false, reason: `Underpayment: received ${amount}, required ${minPrice}` };
   }
 
-  // ── 6. Call Claude to fulfill the job ──────────────────────────────────
+  // ── 6. Call Claude to fulfill the job ─────────────────────────────────────
   const prompt =
     tier === "priority"
       ? `You are an expert specialist. Handle this task urgently with maximum care:\n\n${request}`

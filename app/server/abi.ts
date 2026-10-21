@@ -1,5 +1,63 @@
 // AgentVault ABI — copied from contracts/out/AgentVault.sol/AgentVault.json
 // (contracts/out is not committed; this file is the canonical ABI source for server/ and api/)
+
+// ── VaultFactory ABI ──────────────────────────────────────────────────────────
+
+export const VAULT_FACTORY_ABI = [
+  {
+    "type": "constructor",
+    "inputs": [{ "name": "_usdc", "type": "address", "internalType": "address" }],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "createVault",
+    "inputs": [],
+    "outputs": [{ "name": "vault", "type": "address", "internalType": "address" }],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "isVault",
+    "inputs": [{ "name": "", "type": "address", "internalType": "address" }],
+    "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "vaultCount",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "vaultsOfOwner",
+    "inputs": [{ "name": "owner", "type": "address", "internalType": "address" }],
+    "outputs": [{ "name": "", "type": "address[]", "internalType": "address[]" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "usdc",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address", "internalType": "address" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "VaultCreated",
+    "inputs": [
+      { "name": "owner", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "vault", "type": "address", "indexed": true, "internalType": "address" }
+    ],
+    "anonymous": false
+  },
+  { "type": "error", "name": "ZeroAddress", "inputs": [] }
+] as const;
+
+// ── AgentVault ABI ────────────────────────────────────────────────────────────
+
 export const AGENT_VAULT_ABI = [
   {
     "type": "constructor",

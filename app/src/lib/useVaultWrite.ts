@@ -81,8 +81,8 @@ export function useVaultWrite() {
         setStage('wallet')
         toastId = toast.loading('Confirm in your wallet…')
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const hash = await writeContractAsync(req as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
+        const hash = await writeContractAsync(req as never)
 
         // ── 3. Wait for mining ───────────────────────────────────────────────
         setStage('mining')

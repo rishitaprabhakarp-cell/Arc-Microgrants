@@ -9,9 +9,9 @@ import {
 import type { Hex, Address } from "viem";
 import { runTask, type ResearchDeps, type Tier } from "./research.js";
 import { AGENT_VAULT_ABI } from "./abi.js";
-import type { Config } from "./config.js";
+import type { Config, HostedAgent } from "./config.js";
 
-// ── Fixtures ─────────────────────────────────────────────────────────────────
+// ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const VAULT    = "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa" as Address;
 const AGENT    = "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB" as Address;
@@ -22,18 +22,25 @@ const NONCE    = ("0x" + "cc".repeat(32)) as Hex;
 // Valid 32-byte private key (deterministic test key — never use on mainnet)
 const TEST_PK = ("0x" + "01".repeat(32)) as Hex;
 
+const RESEARCH_AGENT: HostedAgent = {
+  id: "research",
+  name: "Research agent",
+  description: "Researches a question and hires the Specialist.",
+  privateKey: TEST_PK,
+};
+
 const BASE_CONFIG: Config = {
   chain: "arcTestnet",
   rpcUrl: "https://rpc.testnet.arc.io",
-  vaultAddress: VAULT,
-  researchAgentPrivateKey: TEST_PK,
+  factoryAddress: "0xfactoryfactoryfactoryfactoryfactoryfac0" as Address,
+  factoryDeployBlock: 0n,
+  hostedAgents: [RESEARCH_AGENT],
   specialistAddress: PAYEE,
   priceStandard: parseUnits("0.05", 6),
   pricePriority: parseUnits("0.20", 6),
   anthropicApiKey: "sk-test",
   anthropicModel: "claude-haiku-4-5",
   publicBaseUrl: "https://example.com",
-  vaultDeployBlock: 0n,
   blockscoutApiKey: undefined,
 };
 
@@ -76,7 +83,7 @@ function makeAnthropicWithTier(request: string, tier: unknown) {
 // ── Dependency builder ────────────────────────────────────────────────────────
 
 function makeDeps(overrides: Partial<ResearchDeps> = {}): ResearchDeps {
-  const balanceGood = 10n ** 17n; // 0.1 USDC in 18-decimal native units (well above threshold)
+  const balanceGood = 10n ** 17n;
 
   const publicClient = {
     getBalance: vi.fn().mockResolvedValue(balanceGood),
@@ -96,6 +103,8 @@ function makeDeps(overrides: Partial<ResearchDeps> = {}): ResearchDeps {
 
   return {
     config: BASE_CONFIG,
+    vault: VAULT,
+    agent: RESEARCH_AGENT,
     publicClient: publicClient as unknown as ResearchDeps["publicClient"],
     walletClient: walletClient as unknown as ResearchDeps["walletClient"],
     anthropic: makeAnthropicWithTool("please summarise this", "standard") as unknown as ResearchDeps["anthropic"],
@@ -122,11 +131,9 @@ describe("runTask (research agent)", () => {
     expect(result.result).toBe("specialist result text");
     expect(result.explorerUrl).toContain(TX_HASH);
 
-    // writeContract was called
     const wc = deps.walletClient as unknown as { writeContract: ReturnType<typeof vi.fn> };
     expect(wc.writeContract).toHaveBeenCalledOnce();
 
-    // specialist POST was called with correct body
     const fetchMock = deps.fetch as ReturnType<typeof vi.fn>;
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -136,8 +143,20 @@ describe("runTask (research agent)", () => {
     expect(body.tier).toBe("standard");
   });
 
+  it("uses vault address in simulate and writeContract calls", async () => {
+    const deps = makeDeps();
+    await runTask("summarise this", deps);
+
+    const pc = deps.publicClient as unknown as { simulateContract: ReturnType<typeof vi.fn> };
+    const callArgs = pc.simulateContract.mock.calls[0][0] as { address: string };
+    expect(callArgs.address).toBe(VAULT);
+
+    const wc = deps.walletClient as unknown as { writeContract: ReturnType<typeof vi.fn> };
+    const writeArgs = wc.writeContract.mock.calls[0][0] as { address: string };
+    expect(writeArgs.address).toBe(VAULT);
+  });
+
   it("returns rejected with ExceedsPerTxCap when simulate reverts and sends no tx", async () => {
-    // Build a real viem ContractFunctionExecutionError wrapping a ContractFunctionRevertedError
     const cause = new ContractFunctionRevertedError({
       abi: AGENT_VAULT_ABI,
       data: encodeErrorResult({ abi: AGENT_VAULT_ABI, errorName: "ExceedsPerTxCap" }),
@@ -154,12 +173,7 @@ describe("runTask (research agent)", () => {
       simulateContract: vi.fn().mockRejectedValue(revertError),
       waitForTransactionReceipt: vi.fn(),
     };
-
-    const walletClient = {
-      account: { address: AGENT },
-      writeContract: vi.fn(),
-    };
-
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
     const fetchMock = vi.fn();
 
     const deps = makeDeps({
@@ -175,8 +189,6 @@ describe("runTask (research agent)", () => {
     expect(result.kind).toBe("rejected");
     if (result.kind !== "rejected") throw new Error("expected rejected");
     expect(result.reason).toBe("ExceedsPerTxCap");
-
-    // No transaction was sent and specialist was not called
     expect(walletClient.writeContract).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -211,14 +223,11 @@ describe("runTask (research agent)", () => {
 
   it("low gas returns needs gas error and sends no tx", async () => {
     const lowBalPublicClient = {
-      getBalance: vi.fn().mockResolvedValue(5n * 10n ** 15n), // 0.005 — below threshold
+      getBalance: vi.fn().mockResolvedValue(5n * 10n ** 15n),
       simulateContract: vi.fn(),
       waitForTransactionReceipt: vi.fn(),
     };
-    const walletClient = {
-      account: { address: AGENT },
-      writeContract: vi.fn(),
-    };
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
 
     const deps = makeDeps({
       publicClient: lowBalPublicClient as unknown as ResearchDeps["publicClient"],
@@ -232,13 +241,27 @@ describe("runTask (research agent)", () => {
     expect(result.kind).toBe("error");
     if (result.kind !== "error") throw new Error("expected error kind");
     expect(result.message).toMatch(/gas/i);
-
     expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
+  it("gas error message includes agent name", async () => {
+    const lowBalPublicClient = {
+      getBalance: vi.fn().mockResolvedValue(0n),
+      simulateContract: vi.fn(),
+      waitForTransactionReceipt: vi.fn(),
+    };
+    const deps = makeDeps({
+      publicClient: lowBalPublicClient as unknown as ResearchDeps["publicClient"],
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok || result.kind !== "error") throw new Error("expected error kind");
+    expect(result.message).toContain("Research agent");
+  });
+
   it("amount comes from config not from model input", async () => {
-    // Model tries to pass amount = 999 USDC — but that field is not in the schema
-    // and amount is always taken from config. We verify the actual write uses config price.
     const capturedArgs: unknown[] = [];
     const walletClient = {
       account: { address: AGENT },
@@ -256,15 +279,10 @@ describe("runTask (research agent)", () => {
 
     expect(capturedArgs.length).toBeGreaterThan(0);
     const callArgs = capturedArgs[0] as { args: unknown[] };
-    // args[1] is the amount passed to pay(payee, amount, jobId, memo)
     const amount = callArgs.args[1] as bigint;
-    // Must equal priceStandard from config (0.05 USDC = 50000)
     expect(amount).toBe(parseUnits("0.05", 6));
-    // Must NOT be anything from the model (which has no way to set amount)
     expect(amount).not.toBe(parseUnits("999", 6));
   });
-
-  // ── Defect 2: viem error decoding ─────────────────────────────────────────
 
   it("decodes a real viem revert into ExceedsPerTxCap", async () => {
     const cause = new ContractFunctionRevertedError({
@@ -358,12 +376,31 @@ describe("runTask (research agent)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
     expect(result.kind).toBe("error");
-    // Must NOT be "rejected" — RPC failure is not a contract revert
     expect(walletClient.writeContract).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // ── Defect 3: reverted receipt ────────────────────────────────────────────
+  it("retries once on nonce error from writeContract", async () => {
+    const nonceError = new Error("nonce too low");
+    let callCount = 0;
+    const walletClient = {
+      account: { address: AGENT },
+      writeContract: vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) throw nonceError;
+        return Promise.resolve(TX_HASH);
+      }),
+    };
+
+    const deps = makeDeps({
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(true);
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(2);
+  });
 
   it("reverted payment receipt returns error and skips specialist", async () => {
     const publicClient = {
@@ -390,11 +427,8 @@ describe("runTask (research agent)", () => {
     expect(result.kind).toBe("error");
     if (result.kind !== "error") throw new Error("expected error kind");
     expect(result.message).toMatch(/reverted/i);
-    // Specialist must NOT have been called
     expect(fetchMock).not.toHaveBeenCalled();
   });
-
-  // ── Defect 4: non-2xx specialist response ─────────────────────────────────
 
   it("surfaces specialist refusal reason", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
@@ -409,7 +443,6 @@ describe("runTask (research agent)", () => {
 
     const result = await runTask("summarise this document", deps);
 
-    // ok: true because the payment completed on-chain
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
     expect(result.result).toContain("Specialist did not deliver");
