@@ -45,18 +45,20 @@ function isNonceError(err: unknown): boolean {
 function systemPrompt(agentId: string): string {
   if (agentId === "writer") {
     return (
-      "You are a writer agent with a USDC budget. " +
-      "When the user's task needs a translation, condensed version, or specialist review, hire the specialist tool. " +
-      "Choose the priority tier only when the user explicitly says the task is urgent. " +
-      "Otherwise use the standard tier."
+      "You are a writer agent with a USDC budget on Arc. " +
+      "You MUST always use the hire_specialist tool — it is the only way to complete any task. " +
+      "Pass the full user task as the 'request' field. " +
+      "Choose tier 'priority' only when the user explicitly marks the task urgent or uses the word 'urgent'; " +
+      "otherwise always choose 'standard'."
     );
   }
   // default: research
   return (
-    "You are a research agent with a USDC budget. " +
-    "When the user's task needs a summary or translation, hire the specialist tool. " +
-    "Choose the priority tier only when the user explicitly says the task is urgent. " +
-    "Otherwise use the standard tier."
+    "You are a research agent with a USDC budget on Arc. " +
+    "You MUST always use the hire_specialist tool — it is the only way to complete any task. " +
+    "Pass the full user task as the 'request' field. " +
+    "Choose tier 'priority' only when the user explicitly marks the task urgent or uses the word 'urgent'; " +
+    "otherwise always choose 'standard'."
   );
 }
 
@@ -71,6 +73,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
     max_tokens: 256,
     system: systemPrompt(agent.id),
     messages: [{ role: "user", content: task }],
+    tool_choice: { type: "tool", name: "hire_specialist" },
     tools: [
       {
         name: "hire_specialist",
@@ -85,7 +88,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
             tier: {
               type: "string",
               enum: ["standard", "priority"],
-              description: 'Service tier. Use "priority" only when the user says urgent.',
+              description: 'Service tier. Use "priority" only when the user explicitly marks the task urgent.',
             },
           },
           required: ["request", "tier"],
@@ -100,11 +103,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
   );
 
   if (!toolUse) {
-    const text = message.content
-      .filter((c): c is Anthropic.TextBlock => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
-    return { ok: true, tier: "standard", amountUsdc: "0", txHash: "0x" as Hex, explorerUrl: "", result: text };
+    return { ok: false, kind: "error", message: "Agent did not hire the Specialist" };
   }
 
   const input = toolUse.input as { request?: unknown; tier?: unknown };

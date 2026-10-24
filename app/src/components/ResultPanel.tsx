@@ -104,7 +104,7 @@ export function ResultPanel({ result }: Props) {
         </div>
       </div>
 
-      {/* Answer */}
+      {/* Answer — scrollable */}
       <div
         className="mb-4 p-4"
         style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}
@@ -112,9 +112,18 @@ export function ResultPanel({ result }: Props) {
         <p className="arc-label mb-2 text-[10px]" style={{ color: '#ACC6E9' }}>
           <span style={{ color: '#E9A13F' }}>[</span>RESULT<span style={{ color: '#E9A13F' }}>]</span>
         </p>
-        <p className="whitespace-pre-wrap text-sm" style={{ color: 'rgba(255,255,255,0.85)', lineHeight: 1.6 }}>
-          {result.result}
-        </p>
+        <div
+          style={{
+            maxHeight: 360,
+            overflowY: 'auto',
+            scrollbarWidth: 'thin',
+            scrollbarColor: 'rgba(172,198,233,0.35) transparent',
+          }}
+        >
+          <p className="whitespace-pre-wrap text-sm" style={{ color: 'rgba(255,255,255,0.85)', lineHeight: 1.6 }}>
+            {result.result}
+          </p>
+        </div>
       </div>
 
       {noPayment ? (

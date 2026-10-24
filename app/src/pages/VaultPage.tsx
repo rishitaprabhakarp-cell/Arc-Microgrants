@@ -22,7 +22,14 @@ import type { ChecklistStep } from '../lib/setupChecklist'
 
 function shortAddr(a: string) { return `${a.slice(0, 6)}…${a.slice(-4)}` }
 
-function ArcLabel({ children }: { children: string }) {
+function ArcLabel({ children, light }: { children: string; light?: boolean }) {
+  if (light) {
+    return (
+      <span className="arc-label" style={{ color: 'rgba(255,255,255,0.7)', letterSpacing: '0.12em' }}>
+        <span style={{ color: '#E9A13F' }}>[</span>{children}<span style={{ color: '#E9A13F' }}>]</span>
+      </span>
+    )
+  }
   return (
     <span className="arc-label">
       <span className="arc-label-bracket">[</span>{children}<span className="arc-label-bracket">]</span>
@@ -85,7 +92,12 @@ export function VaultPage() {
   const vault = (vaultParam && isAddress(vaultParam) ? vaultParam : null)
 
   // Validate: is this a factory vault?
-  const { data: isFactoryVault } = useReadContract({
+  const {
+    data: isFactoryVault,
+    isLoading: isVaultLoading,
+    isError: isVaultError,
+    refetch: refetchIsVault,
+  } = useReadContract({
     address: FACTORY_ADDRESS,
     abi: VAULT_FACTORY_ABI,
     functionName: 'isVault',
@@ -136,6 +148,36 @@ export function VaultPage() {
         <div className="content-wrap section-pad" style={{ paddingTop: 72 }}>
           <p style={{ color: 'var(--details)' }}>Invalid vault address.</p>
           <button className="btn btn-secondary mt-4" onClick={() => void navigate('/')}>Go home</button>
+        </div>
+      </div>
+    )
+  }
+
+  // Loading: isVault check in flight
+  if (isVaultLoading) {
+    return (
+      <div style={{ minHeight: '100dvh', background: '#F8F9FB' }}>
+        <Nav alwaysScrolled />
+        <div className="content-wrap section-pad" style={{ paddingTop: 72 }}>
+          <p className="text-sm" style={{ color: 'var(--details)' }}>Loading vault…</p>
+        </div>
+      </div>
+    )
+  }
+
+  // RPC error checking isVault
+  if (isVaultError) {
+    return (
+      <div style={{ minHeight: '100dvh', background: '#F8F9FB' }}>
+        <Nav alwaysScrolled />
+        <div className="content-wrap section-pad" style={{ paddingTop: 72 }}>
+          <p className="text-sm" style={{ color: 'var(--details)' }}>Couldn't check this vault.</p>
+          <button
+            className="btn btn-secondary mt-4"
+            onClick={() => void refetchIsVault()}
+          >
+            Retry
+          </button>
         </div>
       </div>
     )
@@ -204,6 +246,9 @@ export function VaultPage() {
 
             {/* Agents section */}
             <div id="agents-section">
+              <div className="grid-cell p-6 pb-2" style={{ background: '#fff' }}>
+                <ArcLabel>AGENTS</ArcLabel>
+              </div>
               {agentsData ? (
                 agentsData.agents.map((a) => (
                   <AgentsPanel
@@ -279,10 +324,10 @@ export function VaultPage() {
             {/* Run a task — owner only */}
             <div id="run-task" ref={taskRef} className="grid-cell p-6"
               style={{ background: 'var(--navy)', color: '#fff' }}>
-              <ArcLabel>RUN A TASK</ArcLabel>
+              <ArcLabel light>RUN A TASK</ArcLabel>
               {!isConnected ? (
                 <p className="mt-4 text-sm" style={{ color: 'rgba(255,255,255,0.6)' }}>
-                  Only the vault owner can run tasks.
+                  Connect the owner wallet to run tasks.
                 </p>
               ) : !isOwner ? (
                 <p className="mt-4 text-sm" style={{ color: 'rgba(255,255,255,0.6)' }}>

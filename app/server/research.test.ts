@@ -207,6 +207,30 @@ describe("runTask (research agent)", () => {
     expect(result.message).toMatch(/tier/i);
   });
 
+  it("returns error when no tool_use block comes back", async () => {
+    const noToolAnthropic = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "Here is my answer directly." }],
+        }),
+      },
+    };
+    const deps = makeDeps({
+      anthropic: noToolAnthropic as unknown as ResearchDeps["anthropic"],
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error kind");
+    expect(result.message).toMatch(/did not hire/i);
+
+    const wc = deps.walletClient as unknown as { writeContract: ReturnType<typeof vi.fn> };
+    expect(wc.writeContract).not.toHaveBeenCalled();
+  });
+
   it("rejects empty request", async () => {
     const deps = makeDeps({
       anthropic: makeAnthropicWithTool("", "standard") as unknown as ResearchDeps["anthropic"],

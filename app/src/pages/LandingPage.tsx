@@ -87,12 +87,12 @@ export function LandingPage() {
                 <div className="mt-3 flex gap-3 text-xs">
                   <span>
                     Standard: <span className="mono font-medium" style={{ color: 'var(--navy)', whiteSpace: 'nowrap' }}>
-                      ${formatUsdc(BigInt(agentsData.specialist.priceStandardUsdc))} USDC
+                      {formatUsdc(BigInt(agentsData.specialist.priceStandardUsdc))} USDC
                     </span>
                   </span>
                   <span>
                     Priority: <span className="mono font-medium" style={{ color: 'var(--navy)', whiteSpace: 'nowrap' }}>
-                      ${formatUsdc(BigInt(agentsData.specialist.pricePriorityUsdc))} USDC
+                      {formatUsdc(BigInt(agentsData.specialist.pricePriorityUsdc))} USDC
                     </span>
                   </span>
                 </div>

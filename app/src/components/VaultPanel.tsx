@@ -178,7 +178,7 @@ export function VaultPanel({ vaultAddress, isOwner }: Props) {
         </button>
       </div>
 
-      {!isOwner && isConnected && (
+      {!isOwner && (
         <p className="mt-3 text-sm" style={{ color: 'var(--details)' }}>Connect the owner wallet to manage this vault.</p>
       )}
     </div>
