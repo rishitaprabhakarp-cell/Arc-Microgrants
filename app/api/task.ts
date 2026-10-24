@@ -101,21 +101,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   // ── Run the task ────────────────────────────────────────────────────────────
-  const task = body.urgent ? `${body.task} This is urgent.` : body.task;
   const walletClient = createWalletClient({ account: agentAccount, chain, transport });
 
-  const result = await runTask(task, {
-    config,
-    vault,
-    agent: hostedAgent,
-    publicClient,
-    walletClient,
-    anthropic,
-    fetch: globalThis.fetch,
-    randomBytes32: () => `0x${randomBytes(32).toString("hex")}` as Hex,
-    getExplorerBase: () =>
-      config.chain === "arc" ? "https://explorer.arc.io" : "https://explorer.testnet.arc.io",
-  });
+  let result;
+  try {
+    result = await runTask(body.task, {
+      config,
+      vault,
+      agent: hostedAgent,
+      urgent: body.urgent,
+      publicClient,
+      walletClient,
+      anthropic,
+      fetch: globalThis.fetch,
+      randomBytes32: () => `0x${randomBytes(32).toString("hex")}` as Hex,
+      getExplorerBase: () =>
+        config.chain === "arc" ? "https://explorer.arc.io" : "https://explorer.testnet.arc.io",
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, kind: "error", message: `Internal error: ${msg}` });
+    return;
+  }
 
   if (!result.ok) {
     const status = result.kind === "rejected" ? 402 : 500;

@@ -129,7 +129,17 @@ export function TaskPanel({ vaultAddress, agentsData, events, onResult }: Props)
         body: JSON.stringify({ vault: vaultAddress, agentId: resolvedAgent.id, task: task.trim(), urgent, issuedAt, signature }),
       })
 
-      const json = await res.json() as TaskResult & { error?: string; reason?: string }
+      // Parse as text first — the server might return plain-text on a crash
+      const rawText = await res.text()
+      let json: TaskResult & { error?: string; reason?: string }
+      try {
+        json = JSON.parse(rawText) as typeof json
+      } catch {
+        // Non-JSON body (e.g. Vercel's plain-text error page)
+        setActiveStep(null)
+        onResult({ ok: false, kind: 'error', message: `Server error (HTTP ${res.status}). Please try again.` })
+        return
+      }
 
       if (!res.ok) {
         const reason = (json as Record<string, unknown>).reason as string | undefined

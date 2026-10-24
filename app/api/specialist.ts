@@ -27,7 +27,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const anthropic = new Anthropic({ apiKey: config.anthropicApiKey });
 
   const body = req.body as ServeJobBody;
-  const result = await serveJob(body, { config, publicClient, anthropic });
+  let result;
+  try {
+    result = await serveJob(body, { config, publicClient, anthropic });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, kind: "error", message: `Internal error: ${msg}` });
+    return;
+  }
 
   if (!result.ok) {
     res.status(402).json(result);

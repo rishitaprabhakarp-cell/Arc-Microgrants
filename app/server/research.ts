@@ -23,6 +23,7 @@ export interface ResearchDeps {
   config: Config;
   vault: Address;
   agent: HostedAgent;
+  urgent: boolean;
   publicClient: PublicClient;
   walletClient: WalletClient;
   anthropic: Anthropic;
@@ -48,8 +49,7 @@ function systemPrompt(agentId: string): string {
       "You are a writer agent with a USDC budget on Arc. " +
       "You MUST always use the hire_specialist tool — it is the only way to complete any task. " +
       "Pass the full user task as the 'request' field. " +
-      "Choose tier 'priority' only when the user explicitly marks the task urgent or uses the word 'urgent'; " +
-      "otherwise always choose 'standard'."
+      "Always choose tier 'standard' regardless of the task content."
     );
   }
   // default: research
@@ -57,73 +57,82 @@ function systemPrompt(agentId: string): string {
     "You are a research agent with a USDC budget on Arc. " +
     "You MUST always use the hire_specialist tool — it is the only way to complete any task. " +
     "Pass the full user task as the 'request' field. " +
-    "Choose tier 'priority' only when the user explicitly marks the task urgent or uses the word 'urgent'; " +
-    "otherwise always choose 'standard'."
+    "Always choose tier 'standard' regardless of the task content."
   );
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function runTask(task: string, deps: ResearchDeps): Promise<TaskResult> {
-  const { config, vault, agent, publicClient, walletClient, anthropic, fetch, randomBytes32, getExplorerBase } = deps;
+  const { config, vault, agent, urgent, publicClient, walletClient, anthropic, fetch, randomBytes32, getExplorerBase } = deps;
 
-  // ── 1. Ask Claude to decide tier and form the specialist request ──────────
-  const message = await anthropic.messages.create({
-    model: config.anthropicModel,
-    max_tokens: 256,
-    system: systemPrompt(agent.id),
-    messages: [{ role: "user", content: task }],
-    tool_choice: { type: "tool", name: "hire_specialist" },
-    tools: [
-      {
-        name: "hire_specialist",
-        description: "Hire the specialist agent to handle a summary or translation task.",
-        input_schema: {
-          type: "object" as const,
-          properties: {
-            request: {
-              type: "string",
-              description: "The specific task for the specialist (summary or translation).",
+  // ── 1. Tier is determined entirely by the urgent flag, never by the model ──
+  const tier: Tier = urgent ? "priority" : "standard";
+  const amount = tier === "priority" ? config.pricePriority : config.priceStandard;
+  const amountUsdc = formatUnits(amount, 6);
+
+  // ── 2. Ask Claude to form the specialist request (tool call optional) ──────
+  // No tool_choice forced: some models reject "type: tool". The system prompt
+  // still strongly requests the tool call. If Claude skips it we fall back.
+  let specialistRequest = task.trim().slice(0, 2000); // fallback: use the original task
+
+  let anthropicMessage: Anthropic.Message | undefined;
+  try {
+    anthropicMessage = await anthropic.messages.create({
+      model: config.anthropicModel,
+      max_tokens: 256,
+      system: systemPrompt(agent.id),
+      messages: [{ role: "user", content: task }],
+      tools: [
+        {
+          name: "hire_specialist",
+          description: "Hire the specialist agent to handle the task.",
+          input_schema: {
+            type: "object" as const,
+            properties: {
+              request: {
+                type: "string",
+                description: "The full task text for the specialist.",
+              },
+              tier: {
+                type: "string",
+                enum: ["standard", "priority"],
+                description: "Service tier (ignored — tier is set by the caller).",
+              },
             },
-            tier: {
-              type: "string",
-              enum: ["standard", "priority"],
-              description: 'Service tier. Use "priority" only when the user explicitly marks the task urgent.',
-            },
+            required: ["request", "tier"],
           },
-          required: ["request", "tier"],
         },
-      },
-    ],
-  });
+      ],
+    });
+  } catch (err: unknown) {
+    // Anthropic API errors (400 model-rejection, 429 rate-limit, network) must
+    // not escape as thrown exceptions — return a safe error result instead.
+    const msg = err instanceof Error ? err.message : String(err);
+    const status =
+      err != null && typeof err === "object" && "status" in err
+        ? ` ${String((err as { status: unknown }).status)}`
+        : "";
+    return { ok: false, kind: "error", message: `Agent model error:${status} ${msg.slice(0, 200)}` };
+  }
 
-  // ── 2. Find the hire_specialist tool call ─────────────────────────────────
-  const toolUse = message.content.find(
+  // ── 3. Extract the specialist request from the tool call (best-effort) ─────
+  const toolUse = anthropicMessage.content.find(
     (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "hire_specialist",
   );
 
-  if (!toolUse) {
-    return { ok: false, kind: "error", message: "Agent did not hire the Specialist" };
+  if (toolUse) {
+    const input = toolUse.input as { request?: unknown };
+    if (typeof input.request === "string" && input.request.trim().length > 0) {
+      specialistRequest = input.request.trim().slice(0, 2000);
+    }
+    // If the tool input has a bad request we keep the fallback (original task)
   }
+  // If no tool_use block: use fallback (original task, already set above)
 
-  const input = toolUse.input as { request?: unknown; tier?: unknown };
-
-  // ── 3. Validate the tool input ────────────────────────────────────────────
-  const tier = input.tier;
-  if (tier !== "standard" && tier !== "priority") {
-    return { ok: false, kind: "error", message: `Invalid tier from model: ${String(tier)}` };
-  }
-
-  const request = input.request;
-  if (typeof request !== "string" || request.trim().length === 0) {
+  if (!specialistRequest) {
     return { ok: false, kind: "error", message: "Specialist request must be a non-empty string" };
   }
-  if (request.length > 2000) {
-    return { ok: false, kind: "error", message: "Specialist request exceeds 2000 characters" };
-  }
-
-  const amount = tier === "priority" ? config.pricePriority : config.priceStandard;
-  const amountUsdc = formatUnits(amount, 6);
 
   // ── 4. Gas check ──────────────────────────────────────────────────────────
   const agentAddress = walletClient.account?.address as Address;
@@ -134,7 +143,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
 
   // ── 5. Compute nonce + jobId ──────────────────────────────────────────────
   const nonce = randomBytes32();
-  const jobId = computeJobId(request, nonce);
+  const jobId = computeJobId(specialistRequest, nonce);
   const memo = `tier:${tier}`;
 
   // ── 6. Simulate first — catch contract custom errors ──────────────────────
@@ -197,7 +206,7 @@ export async function runTask(task: string, deps: ResearchDeps): Promise<TaskRes
   const specResp = await fetch(`${config.publicBaseUrl}/api/specialist`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ txHash, nonce, request, tier }),
+    body: JSON.stringify({ txHash, nonce, request: specialistRequest, tier }),
   });
 
   let result: string;

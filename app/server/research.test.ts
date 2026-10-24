@@ -63,19 +63,20 @@ function makeAnthropicWithTool(request: string, tier: Tier) {
   };
 }
 
-function makeAnthropicWithTier(request: string, tier: unknown) {
+function makeAnthropicNoTool() {
   return {
     messages: {
       create: vi.fn().mockResolvedValue({
-        content: [
-          {
-            type: "tool_use",
-            name: "hire_specialist",
-            id: "tu_1",
-            input: { request, tier },
-          },
-        ],
+        content: [{ type: "text", text: "Here is my answer directly." }],
       }),
+    },
+  };
+}
+
+function makeAnthropicThrows(err: unknown) {
+  return {
+    messages: {
+      create: vi.fn().mockRejectedValue(err),
     },
   };
 }
@@ -105,6 +106,7 @@ function makeDeps(overrides: Partial<ResearchDeps> = {}): ResearchDeps {
     config: BASE_CONFIG,
     vault: VAULT,
     agent: RESEARCH_AGENT,
+    urgent: false,
     publicClient: publicClient as unknown as ResearchDeps["publicClient"],
     walletClient: walletClient as unknown as ResearchDeps["walletClient"],
     anthropic: makeAnthropicWithTool("please summarise this", "standard") as unknown as ResearchDeps["anthropic"],
@@ -193,56 +195,149 @@ describe("runTask (research agent)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects unknown tier", async () => {
+  // ── Tier is driven by the urgent flag, not the model ──────────────────────
+
+  it("urgent=false → standard price even when model says priority", async () => {
+    const capturedArgs: unknown[] = [];
+    const walletClient = {
+      account: { address: AGENT },
+      writeContract: vi.fn().mockImplementation((args: unknown) => {
+        capturedArgs.push(args);
+        return Promise.resolve(TX_HASH);
+      }),
+    };
+
     const deps = makeDeps({
-      anthropic: makeAnthropicWithTier("summarise this", "superfast") as unknown as ResearchDeps["anthropic"],
+      urgent: false,
+      // model responds with priority — must be ignored
+      anthropic: makeAnthropicWithTool("summarise this", "priority") as unknown as ResearchDeps["anthropic"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
     });
 
     const result = await runTask("summarise this", deps);
 
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected not ok");
-    expect(result.kind).toBe("error");
-    if (result.kind !== "error") throw new Error("expected error kind");
-    expect(result.message).toMatch(/tier/i);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.tier).toBe("standard");
+    expect(result.amountUsdc).toBe("0.05");
+    expect(capturedArgs.length).toBeGreaterThan(0);
+    const callArgs = capturedArgs[0] as { args: unknown[] };
+    expect(callArgs.args[1]).toBe(parseUnits("0.05", 6));
   });
 
-  it("returns error when no tool_use block comes back", async () => {
-    const noToolAnthropic = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: "Here is my answer directly." }],
-        }),
-      },
+  it("urgent=true → priority price regardless of model tier", async () => {
+    const capturedArgs: unknown[] = [];
+    const walletClient = {
+      account: { address: AGENT },
+      writeContract: vi.fn().mockImplementation((args: unknown) => {
+        capturedArgs.push(args);
+        return Promise.resolve(TX_HASH);
+      }),
     };
+
     const deps = makeDeps({
-      anthropic: noToolAnthropic as unknown as ResearchDeps["anthropic"],
+      urgent: true,
+      // model responds with standard — must be ignored
+      anthropic: makeAnthropicWithTool("summarise this", "standard") as unknown as ResearchDeps["anthropic"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
     });
 
     const result = await runTask("summarise this", deps);
 
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected not ok");
-    expect(result.kind).toBe("error");
-    if (result.kind !== "error") throw new Error("expected error kind");
-    expect(result.message).toMatch(/did not hire/i);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.tier).toBe("priority");
+    // formatUnits(parseUnits("0.20", 6), 6) === "0.2"
+    expect(result.amountUsdc).toBe("0.2");
+    expect(capturedArgs.length).toBeGreaterThan(0);
+    const callArgs = capturedArgs[0] as { args: unknown[] };
+    expect(callArgs.args[1]).toBe(parseUnits("0.20", 6));
+  });
+
+  // ── No tool_use block → fallback uses original task, still pays ───────────
+
+  it("no tool_use block → falls back to original task and pays (standard)", async () => {
+    const deps = makeDeps({
+      urgent: false,
+      anthropic: makeAnthropicNoTool() as unknown as ResearchDeps["anthropic"],
+    });
+
+    const result = await runTask("summarise this document", deps);
+
+    // Should still succeed — fallback uses the user task
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.tier).toBe("standard");
+    expect(result.amountUsdc).toBe("0.05");
 
     const wc = deps.walletClient as unknown as { writeContract: ReturnType<typeof vi.fn> };
-    expect(wc.writeContract).not.toHaveBeenCalled();
+    expect(wc.writeContract).toHaveBeenCalledOnce();
+
+    // Specialist call should include the original task as the request
+    const fetchMock = deps.fetch as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as Record<string, unknown>;
+    expect(body.request).toBe("summarise this document");
   });
 
-  it("rejects empty request", async () => {
+  it("no tool_use block + urgent=true → priority price fallback", async () => {
     const deps = makeDeps({
-      anthropic: makeAnthropicWithTool("", "standard") as unknown as ResearchDeps["anthropic"],
+      urgent: true,
+      anthropic: makeAnthropicNoTool() as unknown as ResearchDeps["anthropic"],
     });
 
-    const result = await runTask("do something", deps);
+    const result = await runTask("translate this", deps);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.tier).toBe("priority");
+    // formatUnits(parseUnits("0.20", 6), 6) === "0.2"
+    expect(result.amountUsdc).toBe("0.2");
+  });
+
+  // ── Anthropic throws → error result, no transaction ───────────────────────
+
+  it("Anthropic 400 error → error result, no tx sent", async () => {
+    const apiErr = Object.assign(new Error("tool_choice type not supported"), { status: 400 });
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
+    const fetchMock = vi.fn();
+
+    const deps = makeDeps({
+      anthropic: makeAnthropicThrows(apiErr) as unknown as ResearchDeps["anthropic"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this", deps);
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected not ok");
     expect(result.kind).toBe("error");
     if (result.kind !== "error") throw new Error("expected error kind");
-    expect(result.message).toMatch(/non-empty/i);
+    expect(result.message).toMatch(/model error/i);
+    expect(result.message).toContain("400");
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Anthropic network error → error result, no tx sent", async () => {
+    const networkErr = new Error("fetch failed");
+    const walletClient = { account: { address: AGENT }, writeContract: vi.fn() };
+    const fetchMock = vi.fn();
+
+    const deps = makeDeps({
+      anthropic: makeAnthropicThrows(networkErr) as unknown as ResearchDeps["anthropic"],
+      walletClient: walletClient as unknown as ResearchDeps["walletClient"],
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+    });
+
+    const result = await runTask("summarise this", deps);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected not ok");
+    expect(result.kind).toBe("error");
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
   it("low gas returns needs gas error and sends no tx", async () => {
@@ -285,7 +380,7 @@ describe("runTask (research agent)", () => {
     expect(result.message).toContain("Research agent");
   });
 
-  it("amount comes from config not from model input", async () => {
+  it("amount comes from config and urgent flag, not from model input", async () => {
     const capturedArgs: unknown[] = [];
     const walletClient = {
       account: { address: AGENT },
@@ -296,6 +391,7 @@ describe("runTask (research agent)", () => {
     };
 
     const deps = makeDeps({
+      urgent: false,
       walletClient: walletClient as unknown as ResearchDeps["walletClient"],
     });
 
